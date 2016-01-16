@@ -2,18 +2,18 @@
 #define SMACKQUEUE_H
 
 struct Queue *
-queue_create();
+queue_create(void);
 
 
-void 
+void
 queue_destroy(struct Queue *queue);
 
 
-void 
+void
 enqueue(struct Queue *queue, unsigned data);
 
 
-unsigned 
+unsigned
 dequeue(struct Queue *queue);
 
 

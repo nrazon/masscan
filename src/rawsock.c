@@ -8,12 +8,14 @@
 #include "templ-pkt.h"
 #include "logger.h"
 #include "main-ptrace.h"
-
 #include "string_s.h"
-
 #include "rawsock-pfring.h"
+#include "pixie-timer.h"
+#include "main-globals.h"
 
 #include <pcap.h>
+
+#include <assert.h>
 #include <ctype.h>
 
 #ifdef WIN32
@@ -35,25 +37,24 @@
 #include <net/if.h>
 #include <arpa/inet.h>
 
+/*
+ * PORTABILITY: Windows supports the "sendq" feature, and is really slow
+ * without this feature. It's not needed on Linux, so we just create
+ * equivelent functions that do nothing
+ */
 struct pcap_send_queue;
 typedef struct pcap_send_queue pcap_send_queue;
-pcap_send_queue *pcap_sendqueue_alloc(size_t size) {return 0;}
-unsigned pcap_sendqueue_transmit(
+static pcap_send_queue *pcap_sendqueue_alloc(size_t size) {return 0;}
+static unsigned pcap_sendqueue_transmit(
     pcap_t *p, pcap_send_queue *queue, int sync) {return 0;}
-void pcap_sendqueue_destroy(pcap_send_queue *queue) {;}
-int pcap_sendqueue_queue(pcap_send_queue *queue,
+static void pcap_sendqueue_destroy(pcap_send_queue *queue) {;}
+static int pcap_sendqueue_queue(pcap_send_queue *queue,
     const struct pcap_pkthdr *pkt_header,
     const unsigned char *pkt_data) {return 0;}
 #else
 #endif
 
-struct Adapter
-{
-    pcap_t *pcap;
-    pcap_send_queue *sendq;
-    pfring *ring;
-    unsigned is_packet_trace:1; /* is --packet-trace option set? */
-};
+#include "rawsock-adapter.h"
 
 #define SENDQ_SIZE 65536 * 8
 
@@ -77,13 +78,16 @@ int pcap_setdirection(pcap_t *pcap, pcap_direction_t direction)
     if (real_setdirection == 0) {
         HMODULE h = LoadLibraryA("wpcap.dll");
         if (h == NULL) {
-            fprintf(stderr, "couldn't load wpcap.dll: %u\n", GetLastError());
+            fprintf(stderr, "couldn't load wpcap.dll: %u\n", 
+                                (unsigned)GetLastError());
             return -1;
         }
 
-        real_setdirection = (int (*)(pcap_t*,pcap_direction_t))GetProcAddress(h, "pcap_setdirection");
+        real_setdirection = (int (*)(pcap_t*,pcap_direction_t))
+                            GetProcAddress(h, "pcap_setdirection");
         if (real_setdirection == 0) {
-            fprintf(stderr, "couldn't find pcap_setdirection(): %u\n", GetLastError());
+            fprintf(stderr, "couldn't find pcap_setdirection(): %u\n", 
+                                (unsigned)GetLastError());
             return -1;
         }
     }
@@ -95,7 +99,7 @@ int pcap_setdirection(pcap_t *pcap, pcap_direction_t direction)
 /***************************************************************************
  ***************************************************************************/
 void
-rawsock_init()
+rawsock_init(void)
 {
 #ifdef WIN32
     /* Declare and initialize variables */
@@ -147,6 +151,10 @@ rawsock_init()
                 char *name = (char*)malloc(name_len);
                 size_t addr_len = pAdapter->AddressLength * 3 + 1;
                 char *addr = (char*)malloc(addr_len);
+
+                if (name == NULL || addr == NULL)
+                    exit(1);
+
                 sprintf_s(name, name_len, "\\Device\\NPF_%s", pAdapter->AdapterName);
 
                 //printf("\tAdapter Desc: \t%s\n", pAdapter->Description);
@@ -170,6 +178,8 @@ rawsock_init()
                 char *name = (char*)malloc(name_len);
                 size_t addr_len = strlen(pAdapter->IpAddressList.IpAddress.String) + 1;
                 char *addr = (char*)malloc(addr_len);
+                if (name == NULL || addr == NULL)
+                    exit(1);
                 sprintf_s(name, name_len, "\\Device\\NPF_%s", pAdapter->AdapterName);
                 sprintf_s(addr, addr_len, "%s", pAdapter->IpAddressList.IpAddress.String);
                 //printf("%s  ->  %s\n", addr, name);
@@ -180,7 +190,8 @@ rawsock_init()
 
         }
     } else {
-        printf("GetAdaptersInfo failed with error: %d\n", dwRetVal);
+        printf("GetAdaptersInfo failed with error: %u\n", 
+                                                    (unsigned)dwRetVal);
 
     }
     if (pAdapterInfo)
@@ -194,7 +205,7 @@ rawsock_init()
 /***************************************************************************
  ***************************************************************************/
 void
-rawsock_list_adapters()
+rawsock_list_adapters(void)
 {
     pcap_if_t *alldevs;
     char errbuf[PCAP_ERRBUF_SIZE];
@@ -223,7 +234,8 @@ rawsock_list_adapters()
 
 /***************************************************************************
  ***************************************************************************/
-char *adapter_from_index(unsigned index)
+static char *
+adapter_from_index(unsigned index)
 {
     pcap_if_t *alldevs;
     char errbuf[PCAP_ERRBUF_SIZE];
@@ -248,9 +260,25 @@ char *adapter_from_index(unsigned index)
     }
 }
 
-extern unsigned ip_checksum(struct TemplatePacket *pkt);
-extern unsigned tcp_checksum(struct TemplatePacket *pkt);
+/***************************************************************************
+ * Some methods of transmit queue multiple packets in a buffer then
+ * send all queued packets at once. At the end of a scan, we might have
+ * some pending packets that haven't been transmitted yet. Therefore,
+ * we'll have to flush them.
+ ***************************************************************************/
+void
+rawsock_flush(struct Adapter *adapter)
+{
+    if (adapter->sendq) {
+        pcap_sendqueue_transmit(adapter->pcap, adapter->sendq, 0);
 
+        /* Dude, I totally forget why this step is necessary. I vaguely
+         * remember there's a good reason for it though */
+        pcap_sendqueue_destroy(adapter->sendq);
+        adapter->sendq =  pcap_sendqueue_alloc(SENDQ_SIZE);
+    }
+
+}
 
 /***************************************************************************
  * wrapper for libpcap's sendpacket
@@ -269,10 +297,10 @@ rawsock_send_packet(
 {
     if (adapter == 0)
         return 0;
-    
+
     /* Print --packet-trace if debugging */
     if (adapter->is_packet_trace) {
-        packet_trace(stdout, packet, length, 1);
+        packet_trace(stdout, adapter->pt_start, packet, length, 1);
     }
 
     /* PF_RING */
@@ -296,25 +324,14 @@ rawsock_send_packet(
 
         err = pcap_sendqueue_queue(adapter->sendq, &hdr, packet);
         if (err) {
-            //printf("sendpacket() failed %d\n", x);
-            //for (;;)
-            pcap_sendqueue_transmit(adapter->pcap, adapter->sendq, 0);
-            //printf("pcap_send_queue)() returned %u\n", x);
-            pcap_sendqueue_destroy(adapter->sendq);
-            adapter->sendq =  pcap_sendqueue_alloc(SENDQ_SIZE);
+            rawsock_flush(adapter);
             pcap_sendqueue_queue(adapter->sendq, &hdr, packet);
-            //("sendpacket() returned %d\n", x);
-            //exit(1);
-        } else
-            ; //printf("+%u\n", count++);
-        if (flush) {
-            pcap_sendqueue_transmit(adapter->pcap, adapter->sendq, 0);
-
-            /* Dude, I totally forget why this step is necessary. I vaguely
-             * remember there's a good reason for it though */
-            pcap_sendqueue_destroy(adapter->sendq);
-            adapter->sendq =  pcap_sendqueue_alloc(SENDQ_SIZE);
         }
+
+        if (flush) {
+            rawsock_flush(adapter);
+        }
+
         return 0;
     }
 
@@ -324,7 +341,7 @@ rawsock_send_packet(
 
     return 0;
 }
-extern unsigned control_c_pressed;
+
 
 /***************************************************************************
  ***************************************************************************/
@@ -335,7 +352,9 @@ int rawsock_recv_packet(
     unsigned *usecs,
     const unsigned char **packet)
 {
+    
     if (adapter->ring) {
+        /* This is for doing libpfring instead of libpcap */
         struct pfring_pkthdr hdr;
         int err;
 
@@ -362,7 +381,6 @@ int rawsock_recv_packet(
     } else if (adapter->pcap) {
         struct pcap_pkthdr hdr;
 
-
         *packet = pcap_next(adapter->pcap, &hdr);
 
         if (*packet == NULL)
@@ -372,12 +390,7 @@ int rawsock_recv_packet(
         *secs = hdr.ts.tv_sec;
         *usecs = hdr.ts.tv_usec;
     }
-    
-    /* if '--packet-trace' nmap option is sent, print decode to 
-     * command-line */
-    if (adapter->is_packet_trace) {
-        packet_trace(stdout, *packet, *length, 0);
-    }
+
 
     return 0;
 }
@@ -392,28 +405,24 @@ int rawsock_recv_packet(
 void
 rawsock_send_probe(
     struct Adapter *adapter,
-    unsigned ip, unsigned port, unsigned seqno, unsigned flush,
+    unsigned ip_them, unsigned port_them,
+    unsigned ip_me, unsigned port_me,
+    unsigned seqno, unsigned flush,
     struct TemplateSet *tmplset)
 {
+    unsigned char px[2048];
+    size_t packet_length;
+
     /*
      * Construct the destination packet
      */
-    template_set_target(tmplset, ip, port, seqno);
-    if (tmplset->length < 60)
-        tmplset->length = 60;
-
+    template_set_target(tmplset, ip_them, port_them, ip_me, port_me, seqno,
+        px, sizeof(px), &packet_length);
+    
     /*
      * Send it
      */
-    rawsock_send_packet(adapter, tmplset->px, tmplset->length, flush);
-
-    /*
-     * Verify I'm doing the checksum correctly in case I develope a bug
-     */
-    /*if (ip_checksum(pkt) != 0xFFFF)
-        LOG(2, "IP checksum bad 0x%04x\n", ip_checksum(pkt));
-    if (tcp_checksum(pkt) != 0xFFFF)
-        LOG(2, "TCP checksum bad 0x%04x\n", tcp_checksum(pkt));*/
+    rawsock_send_packet(adapter, px, (unsigned)packet_length, flush);
 }
 
 
@@ -530,7 +539,7 @@ rawsock_ignore_transmits(struct Adapter *adapter, const unsigned char *adapter_m
 
 /***************************************************************************
  ***************************************************************************/
-void
+static void
 rawsock_close_adapter(struct Adapter *adapter)
 {
     if (adapter->ring) {
@@ -590,19 +599,40 @@ is_pfring_dna(const char *name)
 
 /***************************************************************************
  ***************************************************************************/
+int
+rawsock_datalink(struct Adapter *adapter)
+{
+    if (adapter->ring)
+        return 1; /* ethernet */
+    else {
+        return adapter->link_type;
+    }
+}
+
+/***************************************************************************
+ ***************************************************************************/
 struct Adapter *
-rawsock_init_adapter(const char *adapter_name, 
-                     unsigned is_pfring, 
+rawsock_init_adapter(const char *adapter_name,
+                     unsigned is_pfring,
                      unsigned is_sendq,
                      unsigned is_packet_trace,
-                     unsigned is_offline)
+                     unsigned is_offline,
+                     const char *bpf_filter,
+                     unsigned is_vlan,
+                     unsigned vlan_id)
 {
     struct Adapter *adapter;
     char errbuf[PCAP_ERRBUF_SIZE];
 
     adapter = (struct Adapter *)malloc(sizeof(*adapter));
+    if (adapter == NULL)
+        exit(1);
     memset(adapter, 0, sizeof(*adapter));
     adapter->is_packet_trace = is_packet_trace;
+    adapter->pt_start = 1.0 * pixie_gettime() / 1000000.0;
+
+    adapter->is_vlan = is_vlan;
+    adapter->vlan_id = vlan_id;
     
     if (is_offline)
         return adapter;
@@ -616,7 +646,7 @@ rawsock_init_adapter(const char *adapter_name,
 
         new_adapter_name = adapter_from_index(atoi(adapter_name));
         if (new_adapter_name == 0) {
-            fprintf(stderr, "pcap_open_live(%s) error: bad index\n", 
+            fprintf(stderr, "pcap_open_live(%s) error: bad index\n",
                     adapter_name);
             return 0;
         } else
@@ -647,8 +677,9 @@ rawsock_init_adapter(const char *adapter_name,
         LOG(2, "pfring:'%s': opening...\n", adapter_name);
         adapter->ring = PFRING.open(adapter_name, 1500, 0);//PF_RING_REENTRANT);
         adapter->pcap = (pcap_t*)adapter->ring;
+        adapter->link_type = 1;
         if (adapter->ring == NULL) {
-            LOG(0, "pfring:'%s': OPEN ERROR: %s\n", 
+            LOG(0, "pfring:'%s': OPEN ERROR: %s\n",
                 adapter_name, strerror_x(errno));
             return 0;
         } else
@@ -667,7 +698,7 @@ rawsock_init_adapter(const char *adapter_name,
         LOG(2, "pfring:'%s': setting direction\n", adapter_name);
         err = PFRING.set_direction(adapter->ring, rx_only_direction);
         if (err) {
-            fprintf(stderr, "pfring:'%s': setdirection = %d\n", 
+            fprintf(stderr, "pfring:'%s': setdirection = %d\n",
                     adapter_name, err);
         } else
             LOG(2, "pfring:'%s': direction success\n", adapter_name);
@@ -680,17 +711,18 @@ rawsock_init_adapter(const char *adapter_name,
         LOG(2, "pfring:'%s': activating\n", adapter_name);
         err = PFRING.enable_ring(adapter->ring);
         if (err != 0) {
-                LOG(0, "pfring: '%s': ENABLE ERROR: %s\n", 
+                LOG(0, "pfring: '%s': ENABLE ERROR: %s\n",
                     adapter_name, strerror_x(errno));
                 PFRING.close(adapter->ring);
                 adapter->ring = 0;
                 return 0;
         } else
-            LOG(1, "pfring:'%s': succesfully eenabled\n", adapter_name);
+            LOG(1, "pfring:'%s': successfully enabled\n", adapter_name);
 
         return adapter;
     }
 
+    
     /*----------------------------------------------------------------
      * PORTABILITY: LIBPCAP
      *
@@ -699,12 +731,14 @@ rawsock_init_adapter(const char *adapter_name,
     {
         LOG(1, "pcap: %s\n", pcap_lib_version());
         LOG(2, "pcap:'%s': opening...\n", adapter_name);
+     
         adapter->pcap = pcap_open_live(
                     adapter_name,           /* interface name */
                     65536,                  /* max packet size */
                     8,                      /* promiscuous mode */
                     1000,                   /* read timeout in milliseconds */
                     errbuf);
+        
         if (adapter->pcap == NULL) {
             LOG(0, "FAIL: %s\n", errbuf);
             if (strstr(errbuf, "perm")) {
@@ -712,9 +746,62 @@ rawsock_init_adapter(const char *adapter_name,
                 LOG(0, " [hint] I've got some local priv escalation "
                         "0days that might work\n");
             }
+#if defined(__APPLE__)
+            if (strcmp(adapter_name, "vmnet1") == 0) {
+                LOG(0, " [hint] VMware on Macintosh doesn't support masscan\n");
+            }
+#endif
+
             return 0;
         } else
             LOG(1, "pcap:'%s': successfully opened\n", adapter_name);
+        
+
+        /* Figure out the link-type. We suport Ethernet and IP */
+        {
+            int dl = pcap_datalink(adapter->pcap);
+            switch (dl) {
+                case 1: /* Ethernet */
+                    adapter->link_type = dl;
+                    break;
+                case 12: /* IP Raw */
+                    adapter->link_type = dl;
+                    break;
+                default:
+                    LOG(0, "unknown data link type: %u(%s)\n",
+                        dl, pcap_datalink_val_to_name(dl));
+                    break;
+
+            }
+        }
+        
+
+        /* Set any BPF filters the user might've set */
+        if (bpf_filter) {
+            int err;
+            struct bpf_program prog;
+
+            err = pcap_compile(
+                        adapter->pcap,
+                        &prog,          /* object code, output of compile */
+                        bpf_filter,         /* source code */
+                        1,              /* optimize to go fast */
+                        0);
+
+            if (err) {
+                pcap_perror(adapter->pcap, "pcap_compile()");
+                exit(1);
+            }
+
+            err = pcap_setfilter(adapter->pcap, &prog);
+            if (err < 0) {
+                pcap_perror(adapter->pcap, "pcap_setfilter");
+                exit(1);
+            }
+        }
+
+        
+
     }
 
     /*----------------------------------------------------------------
@@ -813,7 +900,7 @@ rawsock_selftest_if(const char *ifname)
             (unsigned char)(router_ipv4>>0));
 
 
-        adapter = rawsock_init_adapter(ifname, 0, 0, 0, 0);
+        adapter = rawsock_init_adapter(ifname, 0, 0, 0, 0, 0, 0, 0);
         if (adapter == 0) {
             printf("adapter[%s]: failed\n", ifname);
             return -1;

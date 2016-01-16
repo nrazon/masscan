@@ -1,14 +1,20 @@
-
-
+PREFIX ?= /usr
+BINDIR ?= $(PREFIX)/bin
 SYS := $(shell gcc -dumpmachine)
+GITVER := $(shell git describe --tags)
+INSTALL_DATA := -pDm755
+
+ifeq ($(GITVER),)
+GITVER = "unknown"
+endif
 
 # LINUX
 # The automated regression tests run on Linux, so this is the one
 # environment where things likely will work -- as well as anything
 # works on the bajillion of different Linux environments
 ifneq (, $(findstring linux, $(SYS)))
-LIBS = -lpcap -lm -lrt -ldl -rdynamic -lpthread
-INCLUDES = -I.
+LIBS = -lpcap -lm -lrt -ldl -lpthread
+INCLUDES =
 FLAGS2 = 
 endif
 
@@ -17,9 +23,10 @@ endif
 # my regularly regression-test environment. That means at any point
 # in time, something might be minorly broken in Mac OS X.
 ifneq (, $(findstring darwin, $(SYS)))
-LIBS = -lpcap -lm -rdynamic
+LIBS = -lpcap -lm 
 INCLUDES = -I.
 FLAGS2 = 
+INSTALL_DATA = -pm755
 endif
 
 # MinGW on Windows
@@ -29,7 +36,7 @@ endif
 # to then fix all the errors, so this kinda works now. It's not the
 # intended environment, so it make break in the future.
 ifneq (, $(findstring mingw, $(SYS)))
-INCLUDES = -I. -Ivs10/include
+INCLUDES = -Ivs10/include
 LIBS = -L vs10/lib -lwpcap -lIPHLPAPI -lWs2_32
 FLAGS2 = -march=i686
 endif
@@ -51,34 +58,52 @@ INCLUDES = -I.
 FLAGS2 = 
 endif
 
+# FreeBSD
+ifneq (, $(findstring freebsd, $(SYS)))
+LIBS = -lpcap -lm -pthread
+INCLUDES = -I.
+FLAGS2 =
+endif
+
 # this works on llvm or real gcc
 CC = gcc
 
 DEFINES = 
-CFLAGS = -g -ggdb $(FLAGS2) $(INCLUDES) $(DEFINES) -Wall -O3 -Wno-format
+CFLAGS = -g -ggdb $(FLAGS2) $(INCLUDES) $(DEFINES) -Wall -O3
 .SUFFIXES: .c .cpp
+
+all: bin/masscan 
+
+
+tmp/main-conf.o: src/main-conf.c src/*.h
+	$(CC) $(CFLAGS) -c $< -o $@ -DGIT=\"$(GITVER)\"
+
 
 # just compile everything in the 'src' directory. Using this technique
 # means that include file dependencies are broken, so sometimes when
 # the program crashes unexpectedly, 'make clean' then 'make' fixes the
 # problem that a .h file was out of date
-tmp/%.o: src/%.c
+tmp/%.o: src/%.c src/*.h
 	$(CC) $(CFLAGS) -c $< -o $@
+
 
 SRC = $(wildcard src/*.c)
 OBJ = $(addprefix tmp/, $(notdir $(addsuffix .o, $(basename $(SRC))))) 
 
+
 bin/masscan: $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LIBS)
+	$(CC) $(CFLAGS) -o $@ $(OBJ) $(LDFLAGS) $(LIBS)
 
 clean:
-	rm tmp/*.o
-	rm bin/masscan
+	rm -f tmp/*.o
+	rm -f bin/masscan
 
 regress: bin/masscan
 	bin/masscan --selftest
 
+test: regress
+
 install: bin/masscan
-	echo "No install, binary is bin/masscan"
+	install $(INSTALL_DATA) bin/masscan $(DESTDIR)$(BINDIR)/masscan
 	
 default: bin/masscan

@@ -2,14 +2,12 @@
 #define PROTO_HTTP_H
 #include "proto-banner1.h"
 
-extern struct Patterns http_fields[];
-
+extern struct ProtocolParserStream banner_http;
 
 unsigned
-banner_http(  struct Banner1 *banner1,
-        unsigned state,
-        const unsigned char *px, size_t length,
-        char *banner, unsigned *banner_offset, size_t banner_max);
+http_change_field(unsigned char **inout_header, unsigned header_length,
+                    const char *field_name,
+                    const unsigned char *field_value, unsigned field_value_len);
 
 #endif
 

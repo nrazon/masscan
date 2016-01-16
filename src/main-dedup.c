@@ -9,6 +9,7 @@
     We can mimimize this with a table remembering recent responses. Occassional
     duplicates still leak through, but it'll be less of a problem.
 */
+#include "main-dedup.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -16,8 +17,10 @@
 
 struct DedupEntry
 {
-    unsigned ip;
-    unsigned port;
+    unsigned ip_them;
+    unsigned port_them;
+    unsigned ip_me;
+    unsigned port_me;
 };
 struct DedupTable
 {
@@ -27,11 +30,13 @@ struct DedupTable
 /***************************************************************************
  ***************************************************************************/
 struct DedupTable *
-dedup_create()
+dedup_create(void)
 {
     struct DedupTable *result;
 
     result = (struct DedupTable *)malloc(sizeof(*result));
+    if (result == NULL)
+        exit(1);
     memset(result, 0, sizeof(*result));
 
     return result;
@@ -49,7 +54,9 @@ dedup_destroy(struct DedupTable *table)
 /***************************************************************************
  ***************************************************************************/
 unsigned
-dedup_is_duplicate(struct DedupTable *dedup, unsigned ip, unsigned port)
+dedup_is_duplicate(struct DedupTable *dedup,
+                   unsigned ip_them, unsigned port_them,
+                   unsigned ip_me, unsigned port_me)
 {
     unsigned hash;
     struct DedupEntry *bucket;
@@ -57,24 +64,31 @@ dedup_is_duplicate(struct DedupTable *dedup, unsigned ip, unsigned port)
 
     /* THREAT: probably need to secure this hash, though the syn-cookies
      * provides some protection */
-    hash = (ip + port) ^ ((ip>>8) + (ip>>16)) ^ (ip>>24);
+    hash = (ip_them + port_them) ^ ((ip_me) + (ip_them>>16)) ^ (ip_them>>24) ^ port_me;
     hash &= DEDUP_ENTRIES-1;
 
     /* Search in this bucket */
     bucket = dedup->entries[hash];
 
     for (i = 0; i < 4; i++) {
-        if (bucket[i].ip == ip && bucket[i].port == port) {
+        if (bucket[i].ip_them == ip_them && bucket[i].port_them == port_them
+            && bucket[i].ip_me == ip_me && bucket[i].port_me == port_me) {
             /* move to end of list so constant repeats get ignored */
             if (i > 0) {
-                bucket[i].ip ^= bucket[0].ip;
-                bucket[i].port ^= bucket[0].port;
+                bucket[i].ip_them ^= bucket[0].ip_them;
+                bucket[i].port_them ^= bucket[0].port_them;
+                bucket[i].ip_me ^= bucket[0].ip_me;
+                bucket[i].port_me ^= bucket[0].port_me;
 
-                bucket[0].ip ^= bucket[i].ip;
-                bucket[0].port ^= bucket[i].port;
+                bucket[0].ip_them ^= bucket[i].ip_them;
+                bucket[0].port_them ^= bucket[i].port_them;
+                bucket[0].ip_me ^= bucket[i].ip_me;
+                bucket[0].port_me ^= bucket[i].port_me;
 
-                bucket[i].ip ^= bucket[0].ip;
-                bucket[i].port ^= bucket[0].port;
+                bucket[i].ip_them ^= bucket[0].ip_them;
+                bucket[i].port_them ^= bucket[0].port_them;
+                bucket[i].ip_me ^= bucket[0].ip_me;
+                bucket[i].port_me ^= bucket[0].port_me;
             }
             return 1;
         }
@@ -83,8 +97,10 @@ dedup_is_duplicate(struct DedupTable *dedup, unsigned ip, unsigned port)
     /* We didn't find it, so add it to our list. This will push
      * older entries at this bucket off the list */
     memmove(bucket, bucket+1, 3*sizeof(*bucket));
-    bucket[0].ip = ip;
-    bucket[0].port = port;
+    bucket[0].ip_them = ip_them;
+    bucket[0].port_them = port_them;
+    bucket[0].ip_me = ip_me;
+    bucket[0].port_me = port_me;
 
     return 0;
 }

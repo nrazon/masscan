@@ -2,6 +2,7 @@
     for tracking IP/port ranges
 */
 #include "ranges.h"
+#include "templ-port.h"
 
 #include <assert.h>
 #include <ctype.h>
@@ -99,13 +100,20 @@ rangelist_add_range(struct RangeList *task, unsigned begin, unsigned end)
 
     /* auto-expand the list if necessary */
     if (task->count + 1 >= task->max) {
-        unsigned new_max = task->max * 2 + 1;
-        struct Range *new_list = (struct Range *)malloc(sizeof(*new_list) * new_max);
+        size_t new_max = (size_t)task->max * 2 + 1;
+        struct Range *new_list;
+
+        if (new_max >= SIZE_MAX/sizeof(*new_list))
+            exit(1); /* integer overflow */
+        new_list = (struct Range *)malloc(sizeof(*new_list) * new_max);
+        if (new_list == NULL)
+            exit(1); /* out of memory */
+
         memcpy(new_list, task->list, task->count * sizeof(*new_list));
         if (task->list)
             free(task->list);
         task->list = new_list;
-        task->max = new_max;
+        task->max = (unsigned)new_max;
     }
 
     /* See if the range overlaps any exist range already in the
@@ -136,11 +144,11 @@ rangelist_add_range(struct RangeList *task, unsigned begin, unsigned end)
 /***************************************************************************
  ***************************************************************************/
 void
-rangelist_free(struct RangeList *list)
+rangelist_remove_all(struct RangeList *tasks)
 {
-    if (list->list) {
-        free(list->list);
-        memset(list, 0, sizeof(*list));
+    if (tasks->list) {
+        free(tasks->list);
+        memset(tasks, 0, sizeof(*tasks));
     }
 }
 
@@ -199,7 +207,7 @@ rangelist_remove_range(struct RangeList *task, unsigned begin, unsigned end)
     }
 }
 
-void
+static void
 rangelist_add_range2(struct RangeList *task, struct Range range)
 {
     rangelist_add_range(task, range.begin, range.end);
@@ -285,6 +293,8 @@ range_parse_ipv4(const char *line, unsigned *inout_offset, unsigned max)
     static const struct Range badrange = {0xFFFFFFFF, 0};
     int err;
 
+    if (line == NULL)
+        return badrange;
 
     if (inout_offset == NULL) {
          inout_offset = &offset;
@@ -385,20 +395,21 @@ end:
 /***************************************************************************
  ***************************************************************************/
 uint64_t
-rangelist_exclude(  struct RangeList *targets, 
-              const struct RangeList *excludes)
+rangelist_exclude(  struct RangeList *targets,
+                  const struct RangeList *excludes)
 {
     uint64_t count = 0;
     unsigned i;
-
+    
     for (i=0; i<excludes->count; i++) {
         struct Range range = excludes->list[i];
         count += range.end - range.begin + 1;
         rangelist_remove_range(targets, range.begin, range.end);
     }
-
+    
     return count;
 }
+
 
 /***************************************************************************
  ***************************************************************************/
@@ -440,6 +451,15 @@ rangelist_pick(const struct RangeList *targets, uint64_t index)
     assert(!"end of list");
     return 0;
 }
+
+
+/***************************************************************************
+ * The normal "pick" function is a linear search, which is slow when there
+ * are a lot of ranges. Therefore, the "pick2" creates sort of binary
+ * search that'll be a lot faster. We choose "binary search" because
+ * it's the most cache-efficient, having the least overhead to fit within
+ * the cache.
+ ***************************************************************************/
 unsigned *
 rangelist_pick2_create(struct RangeList *targets)
 {
@@ -447,19 +467,31 @@ rangelist_pick2_create(struct RangeList *targets)
     unsigned i;
     unsigned total = 0;
 
+    if (((size_t)targets->count) >= (size_t)(SIZE_MAX/sizeof(*picker)))
+        exit(1); /* integer overflow */
+    else
     picker = (unsigned *)malloc(targets->count * sizeof(*picker));
+    if (picker == NULL)
+        exit(1); /* out of memory */
+
     for (i=0; i<targets->count; i++) {
         picker[i] = total;
         total += targets->list[i].end - targets->list[i].begin + 1;
     }
     return picker;
 }
+
+/***************************************************************************
+ ***************************************************************************/
 void
 rangelist_pick2_destroy(unsigned *picker)
 {
     if (picker)
         free(picker);
 }
+
+/***************************************************************************
+ ***************************************************************************/
 unsigned
 rangelist_pick2(const struct RangeList *targets, uint64_t index, const unsigned *picker)
 {
@@ -485,10 +517,29 @@ rangelist_pick2(const struct RangeList *targets, uint64_t index, const unsigned 
 
     return (unsigned)(targets->list[mid].begin + (index - picker[mid]));
 }
-int
+
+/***************************************************************************
+ * Provide my own rand() simply to avoid static-analysis warning me that
+ * 'rand()' is unrandom, when in fact we want the non-random properties of
+ * rand() for regression testing.
+ ***************************************************************************/
+static unsigned
+r_rand(unsigned *seed)
+{
+    static const unsigned a = 214013;
+    static const unsigned c = 2531011;
+
+    *seed = (*seed) * a + c;
+    return (*seed)>>16 & 0x7fff;
+}
+
+/***************************************************************************
+ ***************************************************************************/
+static int
 regress_pick2()
 {
     unsigned i;
+    unsigned seed = 0;
 
     /*
      * Run 100 randomized regression tests
@@ -503,17 +554,15 @@ regress_pick2()
         unsigned *picker;
         unsigned range;
 
-        /* seed this test so that it's reproducible (on this platform) */
-        srand(i);
 
         /* Create a new target list */
         memset(targets, 0, sizeof(targets[0]));
 
         /* fill the target list with random ranges */
-        num_targets = rand()%5 + 1;
+        num_targets = r_rand(&seed)%5 + 1;
         for (j=0; j<num_targets; j++) {
-            begin += rand()%10;
-            end = begin + rand()%10;
+            begin += r_rand(&seed)%10;
+            end = begin + r_rand(&seed)%10;
 
             rangelist_add_range(targets, begin, end);
         }
@@ -535,8 +584,9 @@ regress_pick2()
         REGRESS(targets->count == duplicate->count);
         REGRESS(memcmp(targets->list, duplicate->list, targets->count*sizeof(targets->list[0])) == 0);
 
-        rangelist_free(targets);
-        rangelist_free(duplicate);
+        rangelist_remove_all(targets);
+        rangelist_remove_all(duplicate);
+        rangelist_pick2_destroy(picker);
     }
 
     return 0;
@@ -544,12 +594,15 @@ regress_pick2()
 
 
 /***************************************************************************
+ * This returns a character pointer where parsing ends so that it can
+ * handle multiple stuff on the same line
  ***************************************************************************/
 const char *
-rangelist_parse_ports(struct RangeList *ports, const char *string)
+rangelist_parse_ports(struct RangeList *ports, const char *string, unsigned *is_error)
 {
     char *p = (char*)string;
 
+    *is_error = 0;
     while (*p) {
         unsigned port;
         unsigned end;
@@ -558,11 +611,11 @@ rangelist_parse_ports(struct RangeList *ports, const char *string)
         /* skip whitespace */
         while (*p && isspace(*p & 0xFF))
             p++;
-        
+
         /* end at comment */
         if (*p == 0 || *p == '#')
             break;
-        
+
         /* special processing. Nmap allows ports to be prefixed with a
          * characters to clarify TCP, UDP, or SCTP */
         if (isalpha(*p&0xFF) && p[1] == ':') {
@@ -571,21 +624,22 @@ rangelist_parse_ports(struct RangeList *ports, const char *string)
                     proto_offset = 0;
                     break;
                 case 'U': case 'u':
-                    proto_offset = 65536;
+                    proto_offset = Templ_UDP;
                     break;
                 case 'S': case 's':
-                    proto_offset = 65536*2;
+                    proto_offset = Templ_SCTP;
                     break;
                 case 'I': case 'i':
-                    proto_offset = 65536*3;
+                    proto_offset = Templ_ICMP_echo;
                     break;
                 default:
-                    fprintf(stderr, "CONF: bad port charactern = %c\n", p[0]);
-                    exit(1);
+                    fprintf(stderr, "bad port charactern = %c\n", p[0]);
+                    *is_error = 1;
+                    return p;
             }
             p += 2;
         }
-        
+
         if (!isdigit(p[0] & 0xFF))
             break;
 
@@ -597,8 +651,9 @@ rangelist_parse_ports(struct RangeList *ports, const char *string)
         }
 
         if (port > 0xFFFF || end > 0xFFFF || end < port) {
-            fprintf(stderr, "CONF: bad ports: %u-%u\n", port, end);
-            break;
+            fprintf(stderr, "bad ports: %u-%u\n", port, end);
+            *is_error = 2;
+            return p;
         } else {
             rangelist_add_range(ports, port+proto_offset, end+proto_offset);
         }
@@ -616,7 +671,7 @@ rangelist_parse_ports(struct RangeList *ports, const char *string)
  * Called during "make regress" to run a regression test over this module.
  ***************************************************************************/
 int
-ranges_selftest()
+ranges_selftest(void)
 {
     struct Range r;
     struct RangeList task[1];
@@ -684,72 +739,67 @@ ranges_selftest()
     /*
      * Test removal
      */
-    {
-        struct RangeList task[1];
+    memset(task, 0, sizeof(task[0]));
 
-        memset(task, 0, sizeof(task[0]));
+    rangelist_add_range2(task, range_parse_ipv4("10.0.0.0/8", 0, 0));
 
-        rangelist_add_range2(task, range_parse_ipv4("10.0.0.0/8", 0, 0));
-
-        /* These removals shouldn't change anything */
-        rangelist_remove_range2(task, range_parse_ipv4("9.255.255.255", 0, 0));
-        rangelist_remove_range2(task, range_parse_ipv4("11.0.0.0/16", 0, 0));
-        rangelist_remove_range2(task, range_parse_ipv4("192.168.0.0/16", 0, 0));
-        if (task->count != 1
-            || task->list->begin != 0x0a000000
-            || task->list->end != 0x0aFFFFFF) {
-            ERROR();
-            return 1;
-        }
-
-        /* These removals should remove a bit from the edges */
-        rangelist_remove_range2(task, range_parse_ipv4("1.0.0.0-10.0.0.0", 0, 0));
-        rangelist_remove_range2(task, range_parse_ipv4("10.255.255.255-11.0.0.0", 0, 0));
-        if (task->count != 1
-            || task->list->begin != 0x0a000001
-            || task->list->end != 0x0aFFFFFE) {
-            ERROR();
-            return 1;
-        }
-
-
-        /* remove things from the middle */
-        rangelist_remove_range2(task, range_parse_ipv4("10.10.0.0/16", 0, 0));
-        rangelist_remove_range2(task, range_parse_ipv4("10.20.0.0/16", 0, 0));
-        if (task->count != 3) {
-            ERROR();
-            return 1;
-        }
-
-        rangelist_remove_range2(task, range_parse_ipv4("10.12.0.0/16", 0, 0));
-        if (task->count != 4) {
-            ERROR();
-            return 1;
-        }
-
-        rangelist_remove_range2(task, range_parse_ipv4("10.10.10.10-10.12.12.12", 0, 0));
-        if (task->count != 3) {
-            ERROR();
-            return 1;
-        }
-
+    /* These removals shouldn't change anything */
+    rangelist_remove_range2(task, range_parse_ipv4("9.255.255.255", 0, 0));
+    rangelist_remove_range2(task, range_parse_ipv4("11.0.0.0/16", 0, 0));
+    rangelist_remove_range2(task, range_parse_ipv4("192.168.0.0/16", 0, 0));
+    if (task->count != 1
+        || task->list->begin != 0x0a000000
+        || task->list->end != 0x0aFFFFFF) {
+        ERROR();
+        return 1;
     }
+
+    /* These removals should remove a bit from the edges */
+    rangelist_remove_range2(task, range_parse_ipv4("1.0.0.0-10.0.0.0", 0, 0));
+    rangelist_remove_range2(task, range_parse_ipv4("10.255.255.255-11.0.0.0", 0, 0));
+    if (task->count != 1
+        || task->list->begin != 0x0a000001
+        || task->list->end != 0x0aFFFFFE) {
+        ERROR();
+        return 1;
+    }
+
+
+    /* remove things from the middle */
+    rangelist_remove_range2(task, range_parse_ipv4("10.10.0.0/16", 0, 0));
+    rangelist_remove_range2(task, range_parse_ipv4("10.20.0.0/16", 0, 0));
+    if (task->count != 3) {
+        ERROR();
+        return 1;
+    }
+
+    rangelist_remove_range2(task, range_parse_ipv4("10.12.0.0/16", 0, 0));
+    if (task->count != 4) {
+        ERROR();
+        return 1;
+    }
+
+    rangelist_remove_range2(task, range_parse_ipv4("10.10.10.10-10.12.12.12", 0, 0));
+    if (task->count != 3) {
+        ERROR();
+        return 1;
+    }
+
 
     /* test ports */
     {
-        struct RangeList task;
+        unsigned is_error = 0;
+        memset(task, 0, sizeof(task[0]));
 
-        memset(&task, 0, sizeof(task));
-
-        rangelist_parse_ports(&task, "80,1000-2000,1234,4444");
-        if (task.count != 3) {
+        rangelist_parse_ports(task, "80,1000-2000,1234,4444", &is_error);
+        if (task->count != 3 || is_error) {
             ERROR();
             return 1;
         }
 
-        if (task.list[0].begin != 80 || task.list[0].end != 80 ||
-            task.list[1].begin != 1000 || task.list[1].end != 2000 ||
-            task.list[2].begin != 4444 || task.list[2].end != 4444) {
+        if (task->list[0].begin != 80 || task->list[0].end != 80 ||
+            task->list[1].begin != 1000 || task->list[1].end != 2000 ||
+            task->list[2].begin != 4444 || task->list[2].end != 4444) {
             ERROR();
             return 1;
         }

@@ -17,7 +17,7 @@
 #include <net/if_dl.h>
 #include <ctype.h>
 
-#define ROUNDUP(a)							\
+#define ROUNDUP(a)                           \
 ((a) > 0 ? (1 + (((a) - 1) | (sizeof(int) - 1))) : sizeof(int))
 
 static struct sockaddr *
@@ -26,7 +26,7 @@ get_rt_address(struct rt_msghdr *rtm, int desired)
     int i;
     int bitmask = rtm->rtm_addrs;
     struct sockaddr *sa = (struct sockaddr *)(rtm + 1);
-    
+
     for (i = 0; i < RTAX_MAX; i++) {
         if (bitmask & (1 << i)) {
             if ((1<<i) == desired)
@@ -36,7 +36,7 @@ get_rt_address(struct rt_msghdr *rtm, int desired)
             ;
     }
     return NULL;
-    
+
 }
 
 int
@@ -47,27 +47,29 @@ rawsock_get_default_interface(char *ifname, size_t sizeof_ifname)
     int err;
     struct rt_msghdr *rtm;
     size_t sizeof_buffer;
-    
-    
+
+
     /*
      * Requests/responses from the kernel are done with an "rt_msghdr"
      * structure followed by an array of "sockaddr" structures.
      */
     sizeof_buffer = sizeof(*rtm) + sizeof(struct sockaddr_in)*16;
     rtm = (struct rt_msghdr *)malloc(sizeof_buffer);
-    
-    
+    if (rtm == NULL)
+        exit(1);
+
+
     /*
      * Create a socket for querying the kernel
      */
     fd = socket(PF_ROUTE, SOCK_RAW, 0);
-    if (fd <= 0) {
+    if (fd < 0) {
         perror("socket(PF_ROUTE)");
         free(rtm);
         return errno;
     }
-    
-    
+
+
     /*
      * Format and send request to kernel
      */
@@ -78,7 +80,7 @@ rawsock_get_default_interface(char *ifname, size_t sizeof_ifname)
     rtm->rtm_version = RTM_VERSION;
     rtm->rtm_seq = seq;
     rtm->rtm_addrs = RTA_DST | RTA_NETMASK | RTA_GATEWAY | RTA_IFP;
-    
+
     err = write(fd, (char *)rtm, sizeof_buffer);
     if (err < 0 || err != sizeof_buffer) {
         perror("write(RTM_GET)");
@@ -87,7 +89,7 @@ rawsock_get_default_interface(char *ifname, size_t sizeof_ifname)
         free(rtm);
         return -1;
     }
-    
+
     /*
      * Read responses until we find one that belongs to us
      */
@@ -106,17 +108,17 @@ rawsock_get_default_interface(char *ifname, size_t sizeof_ifname)
         break;
     }
     close(fd);
-    
+
     //hexdump(rtm+1, err-sizeof(*rtm));
     //dump_rt_addresses(rtm);
-    
+
     /*
      * Parse our data
      */
     {
         //struct sockaddr_in *sin;
         struct sockaddr_dl *sdl;
-        
+
         sdl = (struct sockaddr_dl *)get_rt_address(rtm, RTA_IFP);
         if (sdl) {
             size_t len = sdl->sdl_nlen;
@@ -124,6 +126,7 @@ rawsock_get_default_interface(char *ifname, size_t sizeof_ifname)
                 len = sizeof_ifname-1;
             memcpy(ifname, sdl->sdl_data, len);
             ifname[len] = 0;
+            free(rtm);
             return 0;
         }
 
@@ -133,9 +136,9 @@ rawsock_get_default_interface(char *ifname, size_t sizeof_ifname)
             free(rtm);
             return 0;
         }*/
-        
+
     }
-    
+
     free(rtm);
     return -1;
 }
@@ -182,7 +185,7 @@ static int read_netlink(int fd, char *bufPtr, size_t sizeof_buffer, int seqNum, 
         /* Check if the header is valid */
         if ((NLMSG_OK(nlHdr, readLen) == 0)
             || (nlHdr->nlmsg_type == NLMSG_ERROR)) {
-            perror("Error in recieved packet");
+            perror("Error in received packet");
             return -1;
         }
 
@@ -373,7 +376,7 @@ again:
         goto again;
     }
     if (err != NO_ERROR) {
-        fprintf(stderr, "GetAdaptersInfo failed with error: %u\n", err);
+        fprintf(stderr, "GetAdaptersInfo failed with error: %u\n", (unsigned)err);
         return EFAULT;
     }
 
@@ -385,7 +388,8 @@ again:
             pAdapter = pAdapter->Next) {
         unsigned ipv4 = 0;
 
-        if (pAdapter->Type != MIB_IF_TYPE_ETHERNET)
+        if (pAdapter->Type != MIB_IF_TYPE_ETHERNET
+            && pAdapter->Type != 71 /*wifi*/)
             continue;
 
 

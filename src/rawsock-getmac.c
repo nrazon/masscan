@@ -6,11 +6,12 @@
         - Linux
         - Apple
         - FreeBSD
- 
+
     I think it'll work the same on any BSD system.
 */
 #include "rawsock.h"
 #include "string_s.h"
+#include "logger.h"
 
 /*****************************************************************************
  *****************************************************************************/
@@ -22,6 +23,7 @@
 #include <netinet/in.h>
 #include <net/if.h>
 #include <arpa/inet.h>
+
 int
 rawsock_get_adapter_mac(const char *ifname, unsigned char *mac)
 {
@@ -43,7 +45,21 @@ rawsock_get_adapter_mac(const char *ifname, unsigned char *mac)
         goto end;
     }
 
+    LOG(1, "%s: type=0x%4x\n", ifname, ifr.ifr_ifru.ifru_hwaddr.sa_family);
+
+
     memcpy(mac, ifr.ifr_ifru.ifru_hwaddr.sa_data, 6);
+
+    /*
+     * [KLUDGE]
+     *  For VPN tunnels with raw IP there isn't a hardware address, so just
+     *  return a fake one instead.
+     */
+    if (memcmp(mac, "\0\0\0\0\0\0", 6) == 0
+            && ifr.ifr_ifru.ifru_hwaddr.sa_family == 0xfffe) {
+        LOG(1, "%s: creating fake address\n", ifname);
+        mac[5] = 1;
+    }
 
 end:
     close(fd);
@@ -96,7 +112,7 @@ again:
         goto again;
     }
     if (err != NO_ERROR) {
-        fprintf(stderr, "GetAdaptersInfo failed with error: %u\n", err);
+        fprintf(stderr, "GetAdaptersInfo failed with error: %u\n", (unsigned)err);
         return EFAULT;
     }
 
@@ -144,15 +160,15 @@ rawsock_get_adapter_mac(const char *ifname, unsigned char *mac)
     int err;
     struct ifaddrs *ifap;
     struct ifaddrs *p;
-    
-    
+
+
     /* Get the list of all network adapters */
     err = getifaddrs(&ifap);
     if (err != 0) {
         perror("getifaddrs");
         return 1;
     }
-    
+
     /* Look through the list until we get our adapter */
     for (p = ifap; p; p = p->ifa_next) {
         if (strcmp(ifname, p->ifa_name) == 0
@@ -160,27 +176,32 @@ rawsock_get_adapter_mac(const char *ifname, unsigned char *mac)
             && p->ifa_addr->sa_family == AF_LINK)
             break;
     }
-    if (p == NULL)
+    if (p == NULL) {
+        LOG(1, "%s: not found\n", ifname);
         goto error; /* not found */
-    
-    
+    }
+
     /* Return the address */
     {
-        size_t len = 6;        
+        size_t len = 6;
         struct sockaddr_dl *link;
-        
+
         link = (struct sockaddr_dl *)p->ifa_addr;
         if (len > link->sdl_alen) {
             memset(mac, 0, 6);
             len = link->sdl_alen;
         }
-        
-        memcpy(     mac,
+
+        LOG(1, "family=%u, type=%u\n",
+               link->sdl_family,
+               link->sdl_type);
+
+        memcpy(mac,
                link->sdl_data + link->sdl_nlen,
                len);
-        
+
     }
-    
+
     freeifaddrs(ifap);
     return 0;
 error:

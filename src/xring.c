@@ -1,6 +1,7 @@
+#include "xring.h"
 #include "pixie-threads.h"
 #include "pixie-timer.h"
-#include <string.h>
+#include "string_s.h"
 #include <stdio.h>
 
 
@@ -19,7 +20,7 @@ struct XRing
 
 /***************************************************************************
  ***************************************************************************/
-Element
+static Element
 xring_remove(struct XRing *xring)
 {
     volatile Element *ring = xring->ring;
@@ -27,7 +28,7 @@ xring_remove(struct XRing *xring)
 
     if (xring->tail >= xring->head)
         return 0;
-    
+
 
     num = ring[xring->tail & (XRING_SIZE-1)];
     if (num) {
@@ -50,7 +51,7 @@ xring_remove(struct XRing *xring)
 enum {XringSuccess, XringFailure};
 /***************************************************************************
  ***************************************************************************/
-int
+static int
 xring_add(struct XRing *xring, Element value)
 {
     volatile Element *ring = xring->ring;
@@ -111,7 +112,7 @@ test_consumer_thread(void *v)
             test->total_count += e;
         }
     }
-    
+
     while (xring->tail < xring->head) {
         Element e;
 
@@ -172,7 +173,7 @@ run_test(struct Test *test)
 
     /* Tell consumer thread to end */
     test->not_active = 1;
-    
+
 
     /* Wait for consumer thread to end */
     while (!test->consumer_done)
@@ -185,17 +186,17 @@ run_test(struct Test *test)
 /***************************************************************************
  ***************************************************************************/
 int
-xring_selftest()
+xring_selftest(void)
 {
     unsigned i;
 
     for (i=0; i<1000; i++) {
-        unsigned long long result;
+        uint64_t result;
         struct Test test[1];
 
         result = run_test(test);
         if (result != 500500) {
-            printf("xring: selftest failed with %llu\n", result);
+            printf("xring: selftest failed with %" PRIu64 "\n", result);
             return 1;
         } else
             ;

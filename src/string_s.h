@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdint.h>
 
 #undef strcpy
 #define strcpy      STRCPY_FUNCTION_IS_BAD
@@ -60,7 +61,11 @@ const char *strerror_x(int x);
 # include <string.h>
 # define strcasecmp     _stricmp
 # define memcasecmp     _memicmp
-
+# ifndef PRIu64
+#  define PRIu64 "llu"
+#  define PRId64 "lld"
+#  define PRIx64 "llx"
+# endif
 
 
 #elif defined(_MSC_VER) && (_MSC_VER == 1200)
@@ -72,7 +77,8 @@ const char *strerror_x(int x);
  typedef int errno_t;
 errno_t fopen_s(FILE **fp, const char *filename, const char *mode);
 
-#elif defined(__GNUC__) && (__GNUC__ == 4)
+#elif defined(__GNUC__) && (__GNUC__ >= 4)
+#include <inttypes.h>
 /* GCC 4 */
 # define sprintf_s      snprintf
 # define vsprintf_s     vsnprintf
@@ -87,6 +93,7 @@ errno_t gmtime_s(struct tm* _tm, const time_t *time);
 #else
 # error unknown compiler
 #endif
+
 
 
 

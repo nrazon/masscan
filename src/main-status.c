@@ -11,12 +11,11 @@
 #include "main-status.h"
 #include "pixie-timer.h"
 #include "unusedparm.h"
+#include "main-globals.h"
+#include "string_s.h"
 #include <stdio.h>
-#include <string.h>
 
 
-extern time_t global_now;
-extern uint64_t global_tcb_count;
 
 /***************************************************************************
  * Print a status message about once-per-second to the command-line. This
@@ -25,16 +24,27 @@ extern uint64_t global_tcb_count;
  ***************************************************************************/
 void
 status_print(
-    struct Status *status, 
-    uint64_t count, 
-    uint64_t max_count, 
-    double x)
+    struct Status *status,
+    uint64_t count,
+    uint64_t max_count,
+    double x,
+    uint64_t total_tcbs,
+    uint64_t total_synacks,
+    uint64_t total_syns,
+    uint64_t exiting)
 {
     double elapsed_time;
     double rate;
     double now;
     double percent_done;
     double time_remaining;
+    uint64_t current_tcbs = 0;
+    uint64_t current_synacks = 0;
+    uint64_t current_syns = 0;
+    double tcb_rate = 0.0;
+    double synack_rate = 0.0;
+    double syn_rate = 0.0;
+
 
     /*
      * ####  FUGGLY TIME HACK  ####
@@ -53,7 +63,7 @@ status_print(
     now = (double)pixie_gettime();
 
     /* Figure how many SECONDS have elapsed, in a floating point value.
-     * Since the above timestamp is in microseconds, we need to 
+     * Since the above timestamp is in microseconds, we need to
      * shift it by 1-million
      */
     elapsed_time = (now - status->last.clock)/1000000.0;
@@ -67,7 +77,7 @@ status_print(
     rate = (count - status->last.count)*1.0/elapsed_time;
 
     /*
-     * Smooth the number by averaging over the last 8 seconds 
+     * Smooth the number by averaging over the last 8 seconds
      */
      status->last_rates[status->last_count++ & 0x7] = rate;
      rate =     status->last_rates[0]
@@ -80,8 +90,8 @@ status_print(
                 + status->last_rates[7]
                 ;
     rate /= 8;
-    if (rate == 0)
-        return;
+    /*if (rate == 0)
+        return;*/
 
     /*
      * Calculate "percent-done", which is just the total number of
@@ -95,20 +105,60 @@ status_print(
      */
     time_remaining  = (1.0 - percent_done/100.0) * (max_count / rate);
 
+    /*
+     * some other stats
+     */
+    if (total_tcbs) {
+        current_tcbs = total_tcbs - status->total_tcbs;
+        status->total_tcbs = total_tcbs;
+        tcb_rate = (1.0*current_tcbs)/elapsed_time;
+    }
+    if (total_synacks) {
+        current_synacks = total_synacks - status->total_synacks;
+        status->total_synacks = total_synacks;
+        synack_rate = (1.0*current_synacks)/elapsed_time;
+    }
+    if (total_syns) {
+        current_syns = total_syns - status->total_syns;
+        status->total_syns = total_syns;
+        syn_rate = (1.0*current_syns)/elapsed_time;
+    }
+
 
     /*
      * Print the message to <stderr> so that <stdout> can be redirected
      * to a file (<stdout> reports what systems were found).
      */
-    fprintf(stderr, "rate:%6.2f-kpps, %5.2f%% done,%4u:%02u:%02u remaining, %llu-tcbs,     \r",
-                    x/1000.0,
-                    percent_done,
-                    (unsigned)(time_remaining/60/60),
-                    (unsigned)(time_remaining/60)%60,
-                    (unsigned)(time_remaining)%60,
-                    global_tcb_count
-                    //(unsigned)rate
-                    );
+    if (status->is_infinite) {
+        fprintf(stderr,
+                "rate:%6.2f-kpps, syn/s=%.0f ack/s=%.0f tcb-rate=%.0f, %" PRIu64 "-tcbs,         \r",
+                        x/1000.0,
+                        syn_rate,
+                        synack_rate,
+                        tcb_rate,
+                        total_tcbs
+                        );
+    } else {
+        if (control_c_pressed) {
+            fprintf(stderr,
+                "rate:%6.2f-kpps, %5.2f%% done, waiting %d-secs, found=%" PRIu64 "       \r",
+                        x/1000.0,
+                        percent_done,
+                        (int)exiting,
+                        total_synacks
+                       );
+        } else {
+            fprintf(stderr,
+                "rate:%6.2f-kpps, %5.2f%% done,%4u:%02u:%02u remaining, found=%" PRIu64 "       \r",
+                        x/1000.0,
+                        percent_done,
+                        (unsigned)(time_remaining/60/60),
+                        (unsigned)(time_remaining/60)%60,
+                        (unsigned)(time_remaining)%60,
+                        total_synacks
+                       );
+        }
+    }
     fflush(stderr);
 
     /*
@@ -124,7 +174,7 @@ void
 status_finish(struct Status *status)
 {
     UNUSEDPARM(status);
-    fprintf(stderr, 
+    fprintf(stderr,
 "                                                                             \r");
 }
 

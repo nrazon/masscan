@@ -1,5 +1,10 @@
 #include "output.h"
 #include "masscan.h"
+#include "masscan-app.h"
+#include "masscan-status.h"
+#include "unusedparm.h"
+
+#include <ctype.h>
 
 /****************************************************************************
  ****************************************************************************/
@@ -22,44 +27,52 @@ text_out_close(struct Output *out, FILE *fp)
 /****************************************************************************
  ****************************************************************************/
 static void
-text_out_status(struct Output *out, FILE *fp, 
-    int status, unsigned ip, unsigned port, unsigned reason, unsigned ttl)
+text_out_status(struct Output *out, FILE *fp, time_t timestamp,
+    int status, unsigned ip, unsigned ip_proto, unsigned port, unsigned reason, unsigned ttl)
 {
     UNUSEDPARM(ttl);
     UNUSEDPARM(reason);
     UNUSEDPARM(out);
-    
 
-    fprintf(fp, "%s tcp %u %u.%u.%u.%u %u\n",
+
+    fprintf(fp, "%s %s %u %u.%u.%u.%u %u\n",
         status_string(status),
+        name_from_ip_proto(ip_proto),
         port,
         (ip>>24)&0xFF,
         (ip>>16)&0xFF,
         (ip>> 8)&0xFF,
         (ip>> 0)&0xFF,
-        (unsigned)global_now
+        (unsigned)timestamp
         );
 }
+
 
 /*************************************** *************************************
  ****************************************************************************/
 static void
-text_out_banner(struct Output *out, FILE *fp, unsigned ip, unsigned port, 
-        unsigned proto, const unsigned char *px, unsigned length)
+text_out_banner(struct Output *out, FILE *fp, time_t timestamp,
+        unsigned ip, unsigned ip_proto, unsigned port,
+        enum ApplicationProtocol proto, unsigned ttl,
+        const unsigned char *px, unsigned length)
 {
+    char banner_buffer[4096];
+
 
     UNUSEDPARM(out);
+    UNUSEDPARM(ttl);
 
-    fprintf(fp, "%s tcp %u %u.%u.%u.%u %u %s %.*s\n",
+    fprintf(fp, "%s %s %u %u.%u.%u.%u %u %s %s\n",
         "banner",
+        name_from_ip_proto(ip_proto),
         port,
         (ip>>24)&0xFF,
         (ip>>16)&0xFF,
         (ip>> 8)&0xFF,
         (ip>> 0)&0xFF,
-        (unsigned)global_now,
-        proto_string(proto),
-        length, px
+        (unsigned)timestamp,
+        masscan_app_to_string(proto),
+        normalize_string(px, length, banner_buffer, sizeof(banner_buffer))
         );
 }
 

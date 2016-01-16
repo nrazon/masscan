@@ -1,15 +1,24 @@
 /*
-7    state machine for receiving banners
+     state machine for receiving banners
 */
 #include "smack.h"
 #include "rawsock-pcapfile.h"
 #include "proto-preprocess.h"
+#include "proto-interactive.h"
 #include "proto-banner1.h"
 #include "proto-http.h"
+#include "proto-ssl.h"
 #include "proto-ssh.h"
+#include "proto-ftp.h"
+#include "proto-smtp.h"
+#include "proto-imap4.h"
+#include "proto-pop3.h"
+#include "proto-vnc.h"
+#include "masscan-app.h"
 #include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 
 
 
@@ -17,8 +26,29 @@ struct Patterns patterns[] = {
     {"SSH-1.",      6, PROTO_SSH1, SMACK_ANCHOR_BEGIN},
     {"SSH-2.",      6, PROTO_SSH2, SMACK_ANCHOR_BEGIN},
     {"HTTP/1.",     7, PROTO_HTTP, SMACK_ANCHOR_BEGIN},
-    {"220-",        4, PROTO_FTP1, SMACK_ANCHOR_BEGIN},
-    {"220 ",        4, PROTO_FTP2, SMACK_ANCHOR_BEGIN},
+    {"220-",        4, PROTO_FTP, SMACK_ANCHOR_BEGIN, 0},
+    {"220 ",        4, PROTO_FTP, SMACK_ANCHOR_BEGIN, 1},
+    {"+OK ",        4, PROTO_POP3, SMACK_ANCHOR_BEGIN},
+    {"* OK ",       5, PROTO_IMAP4, SMACK_ANCHOR_BEGIN},
+    {"\x16\x03\x00",3, PROTO_SSL3, SMACK_ANCHOR_BEGIN},
+    {"\x16\x03\x01",3, PROTO_SSL3, SMACK_ANCHOR_BEGIN},
+    {"\x16\x03\x02",3, PROTO_SSL3, SMACK_ANCHOR_BEGIN},
+    {"\x16\x03\x03",3, PROTO_SSL3, SMACK_ANCHOR_BEGIN},
+    {"\x15\x03\x00",3, PROTO_SSL3, SMACK_ANCHOR_BEGIN},
+    {"\x15\x03\x01",3, PROTO_SSL3, SMACK_ANCHOR_BEGIN},
+    {"\x15\x03\x02",3, PROTO_SSL3, SMACK_ANCHOR_BEGIN},
+    {"\x15\x03\x03",3, PROTO_SSL3, SMACK_ANCHOR_BEGIN},
+    {"RFB 000.000\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 1}, /* UltraVNC repeater mode */
+    {"RFB 003.003\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 3}, /* default version for everything */
+    {"RFB 003.005\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 3}, /* broken, same as 003.003 */
+    {"RFB 003.006\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 3}, /* broken, same as 003.003 */
+    {"RFB 003.007\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 7}, 
+    {"RFB 003.008\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 8}, 
+    {"RFB 003.889\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 8}, /* Apple's remote desktop, 003.007 */
+    {"RFB 003.009\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 8}, 
+    {"RFB 004.000\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 8}, /* Intel AMT KVM */
+    {"RFB 004.001\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 8}, /* RealVNC 4.6 */
+    {"RFB 004.002\n", 12, PROTO_VNC_RFB, SMACK_ANCHOR_BEGIN, 8},
     {0,0}
 };
 
@@ -29,63 +59,149 @@ struct Patterns patterns[] = {
  ***************************************************************************/
 unsigned
 banner1_parse(
-        struct Banner1 *banner1,
-        unsigned state, unsigned *proto,
+        const struct Banner1 *banner1,
+        struct ProtocolState *tcb_state,
         const unsigned char *px, size_t length,
-        char *banner, unsigned *banner_offset, size_t banner_max)
+        struct BannerOutput *banout,
+        struct InteractiveData *more)
 {
     size_t x;
     unsigned offset = 0;
+    unsigned proto;
 
-    switch (*proto) {
-    case PROTO_UNKNOWN:
+
+    switch (tcb_state->app_proto) {
+    case PROTO_NONE:
+    case PROTO_HEUR:
         x = smack_search_next(
                         banner1->smack,
-                        &state, 
+                        &tcb_state->state,
                         px, &offset, (unsigned)length);
-        if (x != SMACK_NOT_FOUND) {
+        if (x != SMACK_NOT_FOUND)
+            proto = patterns[x].id;
+        else
+            proto = 0xFFFFFFFF;
+        if (proto != 0xFFFFFFFF
+            && !(proto == PROTO_SSL3 && !tcb_state->is_sent_sslhello)) {
             unsigned i;
-            *proto = (unsigned)x;
-
-            /* reset the state back again */
-            state = 0;
 
             /* re-read the stuff that we missed */
-            for (i=0; patterns[i].id != *proto; i++)
+            for (i=0; patterns[i].id && patterns[i].id != tcb_state->app_proto; i++)
                 ;
 
-            *banner_offset = 0;
+            /* Kludge: patterns look confusing, so add port info to the
+             * pattern */
+            switch (proto) {
+            case PROTO_FTP:
+                if (patterns[x].extra == 1) {
+                    if (tcb_state->port == 25 || tcb_state->port == 587)
+                        proto = PROTO_SMTP;
+                }
+                break;
+            case PROTO_VNC_RFB:
+                tcb_state->sub.vnc.version = (unsigned char)patterns[x].extra;
+                break;
+            }
 
-            state = banner1_parse(
-                            banner1, 
-                            state, proto, 
-                            (const unsigned char*)patterns[i].pattern, patterns[i].pattern_length,
-                            banner, banner_offset, banner_max);
-            state = banner1_parse(
-                            banner1, 
-                            state, proto, 
-                            px+offset, length-offset,
-                            banner, banner_offset, banner_max);
+            tcb_state->app_proto = (unsigned short)proto;
+
+            /* reset the state back again */
+            tcb_state->state = 0;
+
+            /* If there is any data from a previous packet, re-parse that */
+            {
+                const unsigned char *s = banout_string(banout, PROTO_HEUR);
+                unsigned s_len = banout_string_length(banout, PROTO_HEUR);
+
+                if (s && s_len)
+                banner1_parse(
+                                banner1,
+                                tcb_state,
+                                s, s_len,
+                                banout,
+                                more);
+            }
+            banner1_parse(
+                            banner1,
+                            tcb_state,
+                            px, length,
+                            banout,
+                            more);
         } else {
-            size_t len = length;
-            if (len > banner_max - *banner_offset)
-                len = banner_max - *banner_offset;
-            memcpy(banner + *banner_offset, px, len);
-            (*banner_offset) += (unsigned)len;
+            banout_append(banout, PROTO_HEUR, px, length);
         }
         break;
+    case PROTO_FTP:
+            banner_ftp.parse(   banner1,
+                             banner1->http_fields,
+                             tcb_state,
+                             px, length,
+                             banout,
+                             more);
+            break;
+        case PROTO_SMTP:
+            banner_smtp.parse(   banner1,
+                              banner1->http_fields,
+                              tcb_state,
+                              px, length,
+                              banout,
+                              more);
+            break;
+            
+    case PROTO_POP3:
+            banner_pop3.parse(   banner1,
+                              banner1->http_fields,
+                              tcb_state,
+                              px, length,
+                              banout,
+                              more);
+            break;
+    case PROTO_IMAP4:
+            banner_imap4.parse(banner1,
+                              banner1->http_fields,
+                              tcb_state,
+                              px, length,
+                              banout,
+                              more);
+            break;
+            
     case PROTO_SSH1:
     case PROTO_SSH2:
-    case PROTO_FTP1:
-    case PROTO_FTP2:
-        state = banner_ssh(banner1, state,
-                        px, length,
-                        banner, banner_offset, banner_max);
+        /* generic text-based parser
+         * TODO: in future, need to split these into separate protocols,
+         * especially when binary parsing is added to SSH */
+        banner_ssh.parse(   banner1,
+                            banner1->http_fields,
+                            tcb_state,
+                            px, length,
+                            banout,
+                            more);
         break;
     case PROTO_HTTP:
-        state = banner_http(banner1, state,
+        banner_http.parse(
+                        banner1,
+                        banner1->http_fields,
+                        tcb_state,
                         px, length,
-                        banner, banner_offset, banner_max);
+                        banout,
+                        more);
+        break;
+    case PROTO_SSL3:
+        banner_ssl.parse(
+                        banner1,
+                        banner1->http_fields,
+                        tcb_state,
+                        px, length,
+                        banout,
+                        more);
+        break;
+    case PROTO_VNC_RFB:
+        banner_vnc.parse(    banner1,
+                             banner1->http_fields,
+                             tcb_state,
+                             px, length,
+                             banout,
+                             more);
         break;
     default:
         fprintf(stderr, "banner1: internal error\n");
@@ -93,10 +209,12 @@ banner1_parse(
 
     }
 
-    return state;
+    return tcb_state->app_proto;
 }
 
+
 /***************************************************************************
+ * Create the --banners systems
  ***************************************************************************/
 struct Banner1 *
 banner1_create(void)
@@ -105,6 +223,8 @@ banner1_create(void)
     unsigned i;
 
     b = (struct Banner1 *)malloc(sizeof(*b));
+    if (b == NULL)
+        exit(1);
     memset(b, 0, sizeof(*b));
 
     /*
@@ -116,25 +236,35 @@ banner1_create(void)
                     b->smack,
                     patterns[i].pattern,
                     patterns[i].pattern_length,
-                    patterns[i].id,
+                    i,
                     patterns[i].is_anchored);
     smack_compile(b->smack);
 
-    /*
-     * These match HTTP Header-Field: names
-     */
-    b->http_fields = smack_create("http", SMACK_CASE_INSENSITIVE);
-    for (i=0; http_fields[i].pattern; i++)
-        smack_add_pattern(
-                    b->http_fields,
-                    http_fields[i].pattern,
-                    http_fields[i].pattern_length,
-                    http_fields[i].id,
-                    http_fields[i].is_anchored);
-    smack_compile(b->http_fields);
+
+    banner_http.init(b);
+
+    b->tcp_payloads[80] = &banner_http;
+    b->tcp_payloads[8080] = &banner_http;
+    
+    b->tcp_payloads[443] = (void*)&banner_ssl;   /* HTTP/s */
+    b->tcp_payloads[465] = (void*)&banner_ssl;   /* SMTP/s */
+    b->tcp_payloads[990] = (void*)&banner_ssl;   /* FTP/s */
+    b->tcp_payloads[991] = (void*)&banner_ssl;  
+    b->tcp_payloads[992] = (void*)&banner_ssl;   /* Telnet/s */
+    b->tcp_payloads[993] = (void*)&banner_ssl;   /* IMAP4/s */
+    b->tcp_payloads[994] = (void*)&banner_ssl;  
+    b->tcp_payloads[995] = (void*)&banner_ssl;   /* POP3/s */
+    b->tcp_payloads[2083] = (void*)&banner_ssl;  /* cPanel - SSL */
+    b->tcp_payloads[2087] = (void*)&banner_ssl;  /* WHM - SSL */
+    b->tcp_payloads[2096] = (void*)&banner_ssl;  /* cPanel webmail - SSL */
+    b->tcp_payloads[8443] = (void*)&banner_ssl;  /* Plesk Control Panel - SSL */
+    b->tcp_payloads[9050] = (void*)&banner_ssl;  /* Tor */
+    b->tcp_payloads[8140] = (void*)&banner_ssl;  /* puppet */
+
 
     return b;
 }
+
 
 /***************************************************************************
  ***************************************************************************/
@@ -151,6 +281,9 @@ banner1_destroy(struct Banner1 *b)
 }
 
 
+
+
+
 /***************************************************************************
  * Test the banner1 detection system by throwing random frames at it
  ***************************************************************************/
@@ -159,7 +292,7 @@ banner1_test(const char *filename)
 {
     struct PcapFile *cap;
     unsigned link_type;
-    
+
     cap = pcapfile_openread(filename);
     if (cap == NULL) {
         fprintf(stderr, "%s: can't open capture file\n", filename);
@@ -178,7 +311,7 @@ banner1_test(const char *filename)
         struct PreprocessedInfo parsed;
         unsigned x;
 
-        
+
         packets_read = pcapfile_readframe(
                     cap,    /* capture dump file */
                     &secs, &usecs,
@@ -187,7 +320,7 @@ banner1_test(const char *filename)
         if (packets_read == 0)
             break;
 
-        
+
         x = preprocess_frame(px, length, link_type, &parsed);
         if (x == 0)
             continue;
@@ -199,16 +332,15 @@ banner1_test(const char *filename)
 
 /***************************************************************************
  ***************************************************************************/
-int banner1_selftest()
+int
+banner1_selftest()
 {
     unsigned i;
     struct Banner1 *b;
-    char banner[128];
-    unsigned banner_offset;
-    unsigned state;
-    unsigned proto;
+    struct ProtocolState tcb_state[1];
     const unsigned char *px;
     unsigned length;
+    struct BannerOutput banout[1];
     static const char *http_header =
         "HTTP/1.0 302 Redirect\r\n"
         "Date: Tue, 03 Sep 2013 06:50:01 GMT\r\n"
@@ -220,55 +352,86 @@ int banner1_selftest()
         "Content-Language: en\r\n"
         "Location: http://failsafe.fp.yahoo.com/404.html\r\n"
         "Content-Length: 227\r\n"
-        "\r\n";
+        "\r\n<title>hello</title>\n";
     px = (const unsigned char *)http_header;
     length = (unsigned)strlen(http_header);
+
+
+    /*
+     * First, test the "banout" subsystem
+     */
+    if (banout_selftest() != 0) {
+        fprintf(stderr, "banout: failed\n");
+        return 1;
+    }
 
 
     /*
      * Test one character at a time
      */
     b = banner1_create();
-    memset(banner, 0xa3, sizeof(banner));
-    state = 0;
-    proto = 0;
-    banner_offset = 0;
-    for (i=0; i<length; i++)
-    state = banner1_parse(
+    banout_init(banout);
+
+    memset(tcb_state, 0, sizeof(tcb_state[0]));
+
+    for (i=0; i<length; i++) {
+        struct InteractiveData more = {0,0};
+
+        banner1_parse(
                     b,
-                    state,
-                    &proto,
+                    tcb_state,
                     px+i, 1,
-                    banner, &banner_offset, sizeof(banner)
-                    );
-    if (memcmp(banner, "YTS/1.20.13", 11) != 0) {
-        printf("banner1: test failed\n");
-        return 1;
+                    banout,
+                    &more);
     }
+
+
+    {
+        const unsigned char *s = banout_string(banout, PROTO_HTTP);
+        if (memcmp(s, "HTTP/1.0 302", 11) != 0) {
+            printf("banner1: test failed\n");
+            return 1;
+        }
+    }
+    banout_release(banout);
     banner1_destroy(b);
 
     /*
      * Test whole buffer
      */
     b = banner1_create();
-    memset(banner, 0xa3, sizeof(banner));
-    state = 0;
-    proto = 0;
-    banner_offset = 0;
-    state = banner1_parse(
+
+    memset(tcb_state, 0, sizeof(tcb_state[0]));
+
+    banner1_parse(
                     b,
-                    state,
-                    &proto,
+                    tcb_state,
                     px, length,
-                    banner, &banner_offset, sizeof(banner)
-                    );
-    if (memcmp(banner, "YTS/1.20.13", 11) != 0) {
+                    banout,
+                    0);
+    banner1_destroy(b);
+    /*if (memcmp(banner, "Via:HTTP/1.1", 11) != 0) {
         printf("banner1: test failed\n");
         return 1;
+    }*/
+
+
+    {
+        int x = 0;
+
+        x = banner_ssl.selftest();
+        if (x) {
+            fprintf(stderr, "SSL banner: selftest failed\n");
+            return 1;
+        }
+
+        x = banner_http.selftest();
+        if (x) {
+            fprintf(stderr, "HTTP banner: selftest failed\n");
+            return 1;
+        }
+
+        return x;
     }
-    banner1_destroy(b);
-
-
-    return 0;
 }
 

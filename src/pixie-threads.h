@@ -6,10 +6,25 @@
 #include <intrin.h>
 #endif
 
-size_t pixie_begin_thread(void (*worker_thread)(void*), unsigned flags, void *worker_data);
+/**
+ * Returns the number of CPUs in the system, including virtual CPUs.
+ * On a single processor system, the number returned will be '1'.
+ * On a dual socket, dual-core per socket, hyperthreaded system, the
+ * count will be '8'.
+ */
+unsigned pixie_cpu_get_count(void);
 
+/**
+ * Launch a thread
+ */
+size_t pixie_begin_thread(void (*worker_thread)(void*),
+                          unsigned flags,
+                          void *worker_data);
 
-void pixie_locked_subtract_u32(unsigned *lhs, unsigned rhs); 
+void pixie_cpu_set_affinity(unsigned processor);
+void pixie_cpu_raise_priority(void);
+
+void pixie_locked_subtract_u32(unsigned *lhs, unsigned rhs);
 
 
 
@@ -25,14 +40,14 @@ void pixie_locked_subtract_u32(unsigned *lhs, unsigned rhs);
 #define pixie_locked_CAS32(dst, src, expected) __sync_bool_compare_and_swap((volatile int*)(dst),(int)expected,(int)src);
 #define pixie_locked_CAS64(dst, src, expected) __sync_bool_compare_and_swap((volatile long long int*)(dst),(long long int)expected,(long long int)src);
 
-#if defined(__arm__)
+#if !defined(__x86_64__) && !defined(__i386__)
 #define rte_wmb() __sync_synchronize()
 #define rte_rmb() __sync_synchronize()
 #define rte_pause()
 #else
 #define rte_wmb() asm volatile("sfence;" : : : "memory")
 #define rte_rmb() asm volatile("lfence;" : : : "memory")
-#define rte_pause()	asm volatile ("pause")
+#define rte_pause()   asm volatile ("pause")
 #endif
 #else
 unsigned pixie_locked_add_u32(volatile unsigned *lhs, unsigned rhs);

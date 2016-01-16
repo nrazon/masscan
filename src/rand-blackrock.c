@@ -4,19 +4,19 @@
     (h/t Marsh Ray @marshray for this idea)
 
     This is a randomization/reshuffling function based on a crypto
-    "Feistal network" as describ ed in the paper:
+    "Feistel network" as describ ed in the paper:
 
-    'Ciphers with Arbitrary Finite Domains' 
-        by John Black and Phillip Rogaway 
+    'Ciphers with Arbitrary Finite Domains'
+        by John Black and Phillip Rogaway
         http://www.cs.ucdavis.edu/~rogaway/papers/subset.pdf
 
     This is a crypto-like construction that encrypts an arbitrary sized
-    range. Given a number in the range [0..9999], it'll produce a mapping 
+    range. Given a number in the range [0..9999], it'll produce a mapping
     to a distinct different number in the same range (and back again).
     In other words, it randomizes the order of numbers in a sequence.
 
     For example, it can be used to  randomize the sequence [0..9]:
-    
+
      0 ->      6
      1 ->      4
      2 ->      8
@@ -36,18 +36,19 @@
     randomize it, yet be assured that we've probed every IP and port
     within the range.
 
-    The cryptographic strength of this construction depends upon the 
-    number of rounds, and the exact nature of the inner "F()" function.
-    Because it's a Feistal network, that "F()" function can be almost
+    The cryptographic strength of this construction depends upon the
+    number of rounds, and the exact nature of the inner "READ()" function.
+    Because it's a Feistel network, that "READ()" function can be almost
     anything.
 
     We don't care about cryptographic strength, just speed, so we are
-    using a trivial F() function.
+    using a trivial READ() function.
 
-    This is a class of "format-preserving encryption". There are 
+    This is a class of "format-preserving encryption". There are
     probably better constructions than what I'm using.
 */
 #include "rand-blackrock.h"
+#include "pixie-timer.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -64,14 +65,14 @@
  * It's an s-box. You gotta have an s-box
  ***************************************************************************/
 const unsigned char sbox[256] = {
-0x91, 0x58, 0xb3, 0x31, 0x6c, 0x33, 0xda, 0x88, 
-0x57, 0xdd, 0x8c, 0xf2, 0x29, 0x5a, 0x08, 0x9f, 
-0x49, 0x34, 0xce, 0x99, 0x9e, 0xbf, 0x0f, 0x81, 
-0xd4, 0x2f, 0x92, 0x3f, 0x95, 0xf5, 0x23, 0x00, 
-0x0d, 0x3e, 0xa8, 0x90, 0x98, 0xdd, 0x20, 0x00, 
-0x03, 0x69, 0x0a, 0xca, 0xba, 0x12, 0x08, 0x41, 
-0x6e, 0xb9, 0x86, 0xe4, 0x50, 0xf0, 0x84, 0xe2, 
-0xb3, 0xb3, 0xc8, 0xb5, 0xb2, 0x2d, 0x18, 0x70, 
+0x91, 0x58, 0xb3, 0x31, 0x6c, 0x33, 0xda, 0x88,
+0x57, 0xdd, 0x8c, 0xf2, 0x29, 0x5a, 0x08, 0x9f,
+0x49, 0x34, 0xce, 0x99, 0x9e, 0xbf, 0x0f, 0x81,
+0xd4, 0x2f, 0x92, 0x3f, 0x95, 0xf5, 0x23, 0x00,
+0x0d, 0x3e, 0xa8, 0x90, 0x98, 0xdd, 0x20, 0x00,
+0x03, 0x69, 0x0a, 0xca, 0xba, 0x12, 0x08, 0x41,
+0x6e, 0xb9, 0x86, 0xe4, 0x50, 0xf0, 0x84, 0xe2,
+0xb3, 0xb3, 0xc8, 0xb5, 0xb2, 0x2d, 0x18, 0x70,
 
 0x0a, 0xd7, 0x92, 0x90, 0x9e, 0x1e, 0x0c, 0x1f,
 0x08, 0xe8, 0x06, 0xfd, 0x85, 0x2f, 0xaa, 0x5d,
@@ -104,7 +105,7 @@ const unsigned char sbox[256] = {
 /***************************************************************************
  ***************************************************************************/
 void
-blackrock_init(struct BlackRock *br, uint64_t range, uint64_t seed)
+blackrock_init(struct BlackRock *br, uint64_t range, uint64_t seed, unsigned rounds)
 {
     double foo = sqrt(range * 1.0);
 
@@ -141,35 +142,41 @@ blackrock_init(struct BlackRock *br, uint64_t range, uint64_t seed)
             break;
         default:
             br->range = range;
-            br->a = (uint64_t)(foo - 1);
-            br->b = (uint64_t)(foo + 1);
+            br->a = (uint64_t)(foo - 2);
+            br->b = (uint64_t)(foo + 3);
             break;
     }
 
     while (br->a * br->b <= range)
         br->b++;
 
-    br->rounds = 3;
+    br->rounds = rounds;
     br->seed = seed;
     br->range = range;
 }
 
 
 /***************************************************************************
- * This is a random meaningless function. Well, if we actually wanted
- * crypto-strength, we'd have to improve it, but for now, we just want
- * some random properties.
+ * The inner round/mixer function. In DES, it's a series of S-box lookups,
+ * which 
  ***************************************************************************/
 static inline uint64_t
-F(uint64_t j, uint64_t R, uint64_t seed)
+READ(uint64_t r, uint64_t R, uint64_t seed)
 {
-    static const uint64_t primes[] = {
-        961752031, 982324657, 15485843, 961752031,  };
+    uint64_t r0, r1, r2, r3;
 
-    R = ((R << (R&0x4)) + R + seed);
-    R ^= sbox[R&0xF];
+#define GETBYTE(R,n) ((((R)>>(n*8))^seed^r)&0xFF)
 
-    return (((primes[j] * R + 25ULL) ^ R) + j);
+    R ^= (seed << r) ^ (seed >> (64 - r));
+
+    r0 = sbox[GETBYTE(R,0)]<< 0 | sbox[GETBYTE(R,1)]<< 8;
+    r1 = (sbox[GETBYTE(R,2)]<<16UL | sbox[GETBYTE(R,3)]<<24UL)&0x0ffffFFFFUL;
+    r2 = sbox[GETBYTE(R,4)]<< 0 | sbox[GETBYTE(R,5)]<< 8;
+    r3 = (sbox[GETBYTE(R,6)]<<16UL | sbox[GETBYTE(R,7)]<<24UL)&0x0ffffFFFFUL;
+
+    R = r0 ^ r1 ^ r2<<23UL ^ r3<<33UL;
+
+    return R;
 }
 
 
@@ -182,7 +189,7 @@ F(uint64_t j, uint64_t R, uint64_t seed)
  * Read that paper in order to understand this code.
  ***************************************************************************/
 static inline uint64_t
-fe(unsigned r, uint64_t a, uint64_t b, uint64_t m, uint64_t seed)
+ENCRYPT(unsigned r, uint64_t a, uint64_t b, uint64_t m, uint64_t seed)
 {
     uint64_t L, R;
     unsigned j;
@@ -190,12 +197,12 @@ fe(unsigned r, uint64_t a, uint64_t b, uint64_t m, uint64_t seed)
 
     L = m % a;
     R = m / a;
-    
+
     for (j=1; j<=r; j++) {
         if (j & 1) {
-            tmp = (L + F(j, R, seed)) % a;
+            tmp = (L + READ(j, R, seed)) % a;
         } else {
-            tmp = (L + F(j, R, seed)) % b;
+            tmp = (L + READ(j, R, seed)) % b;
         }
         L = R;
         R = tmp;
@@ -209,19 +216,82 @@ fe(unsigned r, uint64_t a, uint64_t b, uint64_t m, uint64_t seed)
 
 /***************************************************************************
  ***************************************************************************/
+static inline uint64_t
+UNENCRYPT(unsigned r, uint64_t a, uint64_t b, uint64_t m, uint64_t seed)
+{
+    uint64_t L, R;
+    unsigned j;
+    uint64_t tmp;
+
+    if (r & 1) {
+        R = m % a;
+        L = m / a;
+    } else {
+        L = m % a;
+        R = m / a;
+    }
+
+    for (j=r; j>=1; j--) {
+        if (j & 1) {
+            tmp = READ(j, L, seed);
+            if (tmp > R) {
+                tmp = (tmp - R);
+                tmp = a - (tmp%a);
+                if (tmp == a)
+                    tmp = 0;
+            } else {
+                tmp = (R - tmp);
+                tmp %= a;
+            }
+        } else {
+            tmp = READ(j, L, seed);
+            if (tmp > R) {
+                tmp = (tmp - R);
+                tmp = b - (tmp%b);
+                if (tmp == b)
+                    tmp = 0;
+            } else {
+                tmp = (R - tmp);
+                tmp %= b;
+            }
+        }
+        R = L;
+        L = tmp;
+    }
+    return a * R + L;
+}
+
+/***************************************************************************
+ ***************************************************************************/
 uint64_t
 blackrock_shuffle(const struct BlackRock *br, uint64_t m)
 {
     uint64_t c;
 
-    c = fe(br->rounds, br->a, br->b, m, br->seed);
+    c = ENCRYPT(br->rounds, br->a, br->b, m, br->seed);
     while (c >= br->range)
-        c = fe(br->rounds, br->a, br->b,  c, br->seed);
+        c = ENCRYPT(br->rounds, br->a, br->b,  c, br->seed);
 
     return c;
 }
 
 /***************************************************************************
+ ***************************************************************************/
+uint64_t
+blackrock_unshuffle(const struct BlackRock *br, uint64_t m)
+{
+    uint64_t c;
+
+    c = UNENCRYPT(br->rounds, br->a, br->b, m, br->seed);
+    while (c >= br->range)
+        c = UNENCRYPT(br->rounds, br->a, br->b,  c, br->seed);
+
+    return c;
+}
+
+
+/***************************************************************************
+ * This function called only during selftest/regression-test.
  ***************************************************************************/
 static unsigned
 blackrock_verify(struct BlackRock *br, uint64_t max)
@@ -233,6 +303,8 @@ blackrock_verify(struct BlackRock *br, uint64_t max)
 
     /* Allocate a list of 1-byte counters */
     list = (unsigned char *)malloc((size_t)((range<max)?range:max));
+    if (list == NULL)
+        exit(1);
     memset(list, 0, (size_t)((range<max)?range:max));
 
     /* For all numbers in the range, verify increment the counter for the
@@ -257,12 +329,75 @@ blackrock_verify(struct BlackRock *br, uint64_t max)
 
 /***************************************************************************
  ***************************************************************************/
-int
-blackrock_selftest()
+void
+blackrock_benchmark(unsigned rounds)
 {
-    unsigned i;
+    struct BlackRock br;
+    uint64_t range = 0x012356789123UL;
+    uint64_t i;
+    uint64_t result = 0;
+    uint64_t start, stop;
+    static const uint64_t ITERATIONS = 5000000UL;
+
+    printf("-- blackrock-1 -- \n");
+    printf("rounds = %u\n", rounds);
+    blackrock_init(&br, range, 1, rounds);
+
+    /*
+     * Time the the algorithm
+     */
+    start = pixie_nanotime();
+    for (i=0; i<ITERATIONS; i++) {
+        result += blackrock_shuffle(&br, i);
+    }
+    stop = pixie_nanotime();
+
+    /*
+     * Print the results
+     */
+    if (result) {
+        double elapsed = ((double)(stop - start))/(1000000000.0);
+        double rate = ITERATIONS/elapsed;
+
+        rate /= 1000000.0;
+
+        printf("iterations/second = %5.3f-million\n", rate);
+
+    }
+
+    printf("\n");
+
+}
+
+/***************************************************************************
+ ***************************************************************************/
+int
+blackrock_selftest(void)
+{
+    uint64_t i;
     int is_success = 0;
     uint64_t range;
+
+    /* @marshray
+     * Basic test of decryption. I take the index, encrypt it, then decrypt it,
+     * which means I should get the original index back again. Only, it's not
+     * working. The decryption fails. The reason it's failing is obvious -- I'm
+     * just not seeing it though. The error is probably in the 'UNENCRYPT()'
+     * function above.
+     */
+    {
+        struct BlackRock br;
+        uint64_t result, result2;
+        blackrock_init(&br, 1000, 0, 4);
+
+        for (i=0; i<10; i++) {
+            result = blackrock_shuffle(&br, i);
+            result2 = blackrock_unshuffle(&br, result);
+            if (i != result2)
+                return 1; /*fail*/
+        }
+
+    }
 
 
     range = 3015 * 3;
@@ -273,7 +408,7 @@ blackrock_selftest()
         range += 10 + i;
         range *= 2;
 
-        blackrock_init(&br, range, time(0));
+        blackrock_init(&br, range, time(0), 4);
 
         is_success = blackrock_verify(&br, range);
 

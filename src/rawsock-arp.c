@@ -13,6 +13,7 @@
         entry and re-request our address.
 */
 #include "rawsock.h"
+#include "proto-arp.h"
 #include "string_s.h"
 #include "logger.h"
 #include "pixie-timer.h"
@@ -36,8 +37,9 @@ struct ARP_IncomingRequest
 
 /****************************************************************************
  ****************************************************************************/
-void
-proto_arp_parse(struct ARP_IncomingRequest *arp, const unsigned char px[], unsigned offset, unsigned max)
+static void
+proto_arp_parse(struct ARP_IncomingRequest *arp,
+                const unsigned char px[], unsigned offset, unsigned max)
 {
 
     /*
@@ -80,31 +82,58 @@ proto_arp_parse(struct ARP_IncomingRequest *arp, const unsigned char px[], unsig
     arp->is_valid = 1;
 }
 
+#include "rawsock-adapter.h"
 
 /****************************************************************************
+ * Resolve the IP address into a MAC address. Do this synchronously, meaning,
+ * we'll stop and wait for the response. This is done at program startup,
+ * but not during then normal asynchronous operation during the scan.
  ****************************************************************************/
-int arp_resolve_sync(struct Adapter *adapter,
+int
+arp_resolve_sync(struct Adapter *adapter,
     unsigned my_ipv4, const unsigned char *my_mac_address,
     unsigned your_ipv4, unsigned char *your_mac_address)
 {
-    unsigned char arp_packet[64];
+    unsigned char xarp_packet[64];
+    unsigned char *arp_packet = &xarp_packet[0];
     unsigned i;
     time_t start;
+    unsigned is_arp_notice_given = 0;
     struct ARP_IncomingRequest response;
+
+    /*
+     * [KLUDGE]
+     *  If this is a VPN connection with raw IPv4, then we don't do any
+     *  ARPing, just return immediately. In other words, there's nothing
+     *  here to ARP
+     */
+    if (rawsock_datalink(adapter) == 12) {
+        memcpy(your_mac_address, "\0\0\0\0\0\2", 6);
+        return 0; /* success */
+    }
 
     memset(&response, 0, sizeof(response));
 
     /* zero out bytes in packet to avoid leaking stuff in the padding
      * (ARP is 42 byte packet, Ethernet is 60 byte minimum) */
-    memset(arp_packet, 0, sizeof(arp_packet));
+    memset(arp_packet, 0, sizeof(xarp_packet));
 
     /*
      * Create the request packet
      */
     memcpy(arp_packet +  0, "\xFF\xFF\xFF\xFF\xFF\xFF", 6);
     memcpy(arp_packet +  6, my_mac_address, 6);
+    
+    if (adapter->is_vlan) {
+        memcpy(arp_packet + 12, "\x81\x00", 2);
+        arp_packet[14] = (unsigned char)(adapter->vlan_id>>8);
+        arp_packet[15] = (unsigned char)(adapter->vlan_id&0xFF);
+        arp_packet += 4;
+    }
+    
     memcpy(arp_packet + 12, "\x08\x06", 2);
 
+    
     memcpy(arp_packet + 14,
             "\x00\x01" /* hardware = Ethernet */
             "\x08\x00" /* protocol = IPv4 */
@@ -125,6 +154,11 @@ int arp_resolve_sync(struct Adapter *adapter,
     arp_packet[41] = (unsigned char)(your_ipv4 >>  0);
 
 
+    /* kludge me: this is the wrong thing to do
+     * FIXME: */
+    if (adapter->is_vlan)
+        arp_packet -= 4;
+    
     /*
      * Now loop for a few seconds looking for the response
      */
@@ -145,6 +179,18 @@ int arp_resolve_sync(struct Adapter *adapter,
                 break; /* timeout */
         }
 
+        /* If we aren't getting a response back to our ARP, then print a
+         * status message */
+        if (time(0) > start+1 && !is_arp_notice_given) {
+            fprintf(stderr, "ARPing local router %u.%u.%u.%u\n",
+                (unsigned char)(your_ipv4>>24),
+                (unsigned char)(your_ipv4>>16),
+                (unsigned char)(your_ipv4>> 8),
+                (unsigned char)(your_ipv4>> 0)
+                );
+            is_arp_notice_given = 1;
+        }
+
         err =  rawsock_recv_packet(
                     adapter,
                     &length,
@@ -155,14 +201,19 @@ int arp_resolve_sync(struct Adapter *adapter,
         if (err != 0)
             continue;
 
-        if (px[13] != 6)
+        if (adapter->is_vlan && px[17] != 6)
+            continue;
+        if (!adapter->is_vlan && px[13] != 6)
             continue;
 
 
         /*
          * Parse the response as an ARP packet
          */
-        proto_arp_parse(&response, px, 14, length);
+        if (adapter->is_vlan)
+            proto_arp_parse(&response, px, 18, length);
+        else
+            proto_arp_parse(&response, px, 14, length);
 
         /* Is this an ARP packet? */
         if (!response.is_valid) {
@@ -204,7 +255,8 @@ int arp_resolve_sync(struct Adapter *adapter,
 
 /****************************************************************************
  ****************************************************************************/
-int arp_response(
+int
+arp_response(
     unsigned my_ip, const unsigned char *my_mac,
     const unsigned char *px, unsigned length,
     PACKET_QUEUE *packet_buffers,
@@ -227,8 +279,10 @@ int arp_response(
             pixie_usleep(100);
         }
     }
+    if (response == NULL)
+        return -1; /* just to supress warnings */
 
-    /* ARP packets are too short, so increase the packet size to 
+    /* ARP packets are too short, so increase the packet size to
      * the Ethernet minimum */
     response->length = 60;
 

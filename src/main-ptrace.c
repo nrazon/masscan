@@ -4,13 +4,11 @@
 #include "string_s.h"
 
 
-double global_timestamp_start;
-
 /***************************************************************************
  * Print packet info, when using nmap-style --packet-trace option
  ***************************************************************************/
 void
-packet_trace(FILE *fp, const unsigned char *px, size_t length, unsigned is_sent)
+packet_trace(FILE *fp, double pt_start, const unsigned char *px, size_t length, unsigned is_sent)
 {
     unsigned x;
     struct PreprocessedInfo parsed;
@@ -23,7 +21,7 @@ packet_trace(FILE *fp, const unsigned char *px, size_t length, unsigned is_sent)
     double timestamp = 1.0 * pixie_gettime() / 1000000.0;
     unsigned offset;
     const char *direction;
-    
+
     if (is_sent)
         direction = "SENT";
     else
@@ -34,46 +32,48 @@ packet_trace(FILE *fp, const unsigned char *px, size_t length, unsigned is_sent)
     if (!x)
         return;
     offset = parsed.found_offset;
-    
-    src_ip = px[parsed.ip_offset + 12] << 24
-        | px[parsed.ip_offset + 13] << 16
-        | px[parsed.ip_offset + 14] << 8
-        | px[parsed.ip_offset + 15];
-    dst_ip = px[parsed.ip_offset + 16] << 24
-        | px[parsed.ip_offset + 17] << 16
-        | px[parsed.ip_offset + 18] << 8
-        | px[parsed.ip_offset + 19];
+
+    src_ip = parsed.ip_src[0] << 24
+        | parsed.ip_src[1] << 16
+        | parsed.ip_src[2] << 8
+        | parsed.ip_src[3];
+    dst_ip = parsed.ip_dst[0] << 24
+        | parsed.ip_dst[1] << 16
+        | parsed.ip_dst[2] << 8
+        | parsed.ip_dst[3];
 
     /* format the IP addresses into fixed-width fields */
     sprintf_s(from, sizeof(from), "%u.%u.%u.%u:%u",
               (src_ip>>24)&0xFF, (src_ip>>16)&0xFF,
               (src_ip>>8)&0xFF, (src_ip>>0)&0xFF,
               parsed.port_src);
-    
+
     sprintf_s(to, sizeof(to), "%u.%u.%u.%u:%u",
               (dst_ip>>24)&0xFF, (dst_ip>>16)&0xFF,
               (dst_ip>>8)&0xFF, (dst_ip>>0)&0xFF,
               parsed.port_dst);
-    
+
     switch (parsed.found) {
         case FOUND_ARP:
             type = px[offset+6]<<8 | px[offset+7];
+            *strchr(to, ':') = '\0';
+            *strchr(from, ':') = '\0';
             switch (type) {
-                case 0:strcpy_s(sz_type, sizeof(sz_type), "request"); break;
-                case 1:strcpy_s(sz_type, sizeof(sz_type), "response"); break;
+                case 1:strcpy_s(sz_type, sizeof(sz_type), "request"); break;
+                case 2:strcpy_s(sz_type, sizeof(sz_type), "response"); break;
                 default: sprintf_s(sz_type, sizeof(sz_type), "unknown(%u)", type); break;
             }
             fprintf(fp, "%s (%5.4f) ARP  %-21s > %-21s %s\n", direction,
-                    timestamp - global_timestamp_start, from, to, sz_type);
+                    timestamp - pt_start, from, to, sz_type);
             break;
         case FOUND_DNS:
         case FOUND_UDP:
             fprintf(fp, "%s (%5.4f) UDP  %-21s > %-21s \n", direction,
-                    timestamp - global_timestamp_start, from, to);
+                    timestamp - pt_start, from, to);
             break;
         case FOUND_ICMP:
             fprintf(fp, "%s (%5.4f) ICMP %-21s > %-21s \n", direction,
-                    timestamp - global_timestamp_start, from, to);
+                    timestamp - pt_start, from, to);
             break;
         case FOUND_TCP:
             type = px[offset+13];
@@ -103,14 +103,18 @@ packet_trace(FILE *fp, const unsigned char *px, size_t length, unsigned is_sent)
                               );
                     break;
             }
+            if (parsed.app_length)
+            fprintf(fp, "%s (%5.4f) TCP  %-21s > %-21s %s %u-bytes\n", direction,
+                    timestamp - pt_start, from, to, sz_type, parsed.app_length);
+            else
             fprintf(fp, "%s (%5.4f) TCP  %-21s > %-21s %s\n", direction,
-                    timestamp - global_timestamp_start, from, to, sz_type);
+                    timestamp - pt_start, from, to, sz_type);
             break;
         case FOUND_IPV6:
             break;
         default:
-            fprintf(fp, "%s (%5.4f) UNK  %-21s > %-21s [%u]\n", direction, 
-                    timestamp - global_timestamp_start, from, to, parsed.found);
+            fprintf(fp, "%s (%5.4f) UNK  %-21s > %-21s [%u]\n", direction,
+                    timestamp - pt_start, from, to, parsed.found);
             break;
     }
 

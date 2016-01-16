@@ -1,45 +1,66 @@
 #include "proto-udp.h"
 #include "proto-dns.h"
+#include "proto-netbios.h"
+#include "proto-snmp.h"
+#include "proto-ntp.h"
+#include "proto-zeroaccess.h"
 #include "proto-preprocess.h"
 #include "syn-cookie.h"
 #include "logger.h"
 #include "output.h"
-#include "masscan.h"
+#include "masscan-status.h"
 #include "unusedparm.h"
 
-static int
-matches_me(struct Output *out, unsigned ip, unsigned port)
-{
-    unsigned i;
-
-    for (i=0; i<8; i++) {
-        if (ip == out->nics[i].ip_me && port == out->nics[i].port_me)
-            return 1;
-    }
-    return 0;
-}
 
 
-void handle_udp(struct Output *out, const unsigned char *px, unsigned length, struct PreprocessedInfo *parsed)
+/****************************************************************************
+ ****************************************************************************/
+void 
+handle_udp(struct Output *out, time_t timestamp,
+        const unsigned char *px, unsigned length, 
+        struct PreprocessedInfo *parsed, uint64_t entropy)
 {
     unsigned ip_them;
     unsigned port_them = parsed->port_src;
+    unsigned status = 0;
 
     ip_them = parsed->ip_src[0]<<24 | parsed->ip_src[1]<<16
             | parsed->ip_src[2]<< 8 | parsed->ip_src[3]<<0;
 
-    output_report_status(
-                        out,
-                        Port_UdpClosed,
-                        ip_them,
-                        port_them,
-                        0,
-                        0);
+
 
     switch (port_them) {
-    case 53:
-        handle_dns(out, px, length, parsed);
-        break;
+        case 53:
+            status = handle_dns(out, timestamp, px, length, parsed, entropy);
+            break;
+        case 123:
+            status = ntp_handle_response(out, timestamp, px, length, parsed, entropy);
+            break;
+        case 137:
+            status = handle_nbtstat(out, timestamp, px, length, parsed, entropy);
+            break;
+        case 161:
+            status = handle_snmp(out, timestamp, px, length, parsed, entropy);
+            break;
+        case 16464:
+        case 16465:
+        case 16470:
+        case 16471:
+            status = handle_zeroaccess(out, timestamp, px, length, parsed, entropy);
+            break;
+            
     }
+
+    if (status == 0)
+        output_report_status(
+                        out,
+                        timestamp,
+                        PortStatus_Open,
+                        ip_them,
+                        17, /* ip proto = udp */
+                        port_them,
+                        0,
+                        0,
+                        parsed->mac_src);
 
 }

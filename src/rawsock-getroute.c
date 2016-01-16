@@ -18,16 +18,16 @@
 #include <net/if_dl.h>
 #include <ctype.h>
 
-#define ROUNDUP(a)							\
+#define ROUNDUP(a)                           \
 ((a) > 0 ? (1 + (((a) - 1) | (sizeof(int) - 1))) : sizeof(int))
 
-struct sockaddr *
+static struct sockaddr *
 get_rt_address(struct rt_msghdr *rtm, int desired)
 {
     int i;
     int bitmask = rtm->rtm_addrs;
     struct sockaddr *sa = (struct sockaddr *)(rtm + 1);
-    
+
     for (i = 0; i < RTAX_MAX; i++) {
         if (bitmask & (1 << i)) {
             if ((1<<i) == desired)
@@ -45,11 +45,11 @@ hexdump(const void *v, size_t len)
 {
     const unsigned char *p = (const unsigned char *)v;
     size_t i;
-    
-    
+
+
     for (i=0; i<len; i += 16) {
         size_t j;
-        
+
         for (j=i; j<i+16 && j<len; j++)
             printf("%02x ", p[j]);
         for (;j<i+16; j++)
@@ -76,12 +76,15 @@ hexdump(const void *v, size_t len)
 #endif
 
 void
+dump_rt_addresses(struct rt_msghdr *rtm);
+
+void
 dump_rt_addresses(struct rt_msghdr *rtm)
 {
     int i;
     int bitmask = rtm->rtm_addrs;
     struct sockaddr *sa = (struct sockaddr *)(rtm + 1);
-    
+
     for (i = 0; i < RTAX_MAX; i++) {
         if (bitmask & (1 << i)) {
             printf("b=%u fam=%u len=%u\n", (1<<i), sa->sa_family, sa->sa_len);
@@ -92,7 +95,8 @@ dump_rt_addresses(struct rt_msghdr *rtm)
     }
 }
 
-int rawsock_get_default_gateway(const char *ifname, unsigned *ipv4)
+int
+rawsock_get_default_gateway(const char *ifname, unsigned *ipv4)
 {
     int fd;
     int seq = time(0);
@@ -107,13 +111,15 @@ int rawsock_get_default_gateway(const char *ifname, unsigned *ipv4)
      */
     sizeof_buffer = sizeof(*rtm) + sizeof(struct sockaddr_in)*16;
     rtm = (struct rt_msghdr *)malloc(sizeof_buffer);
+    if (rtm == NULL)
+        exit(1);
 
 
     /*
      * Create a socket for querying the kernel
      */
     fd = socket(PF_ROUTE, SOCK_RAW, 0);
-    if (fd <= 0) {
+    if (fd < 0) {
         perror("socket(PF_ROUTE)");
         free(rtm);
         return errno;
@@ -161,14 +167,14 @@ int rawsock_get_default_gateway(const char *ifname, unsigned *ipv4)
 
     //hexdump(rtm+1, err-sizeof(*rtm));
     //dump_rt_addresses(rtm);
-    
+
     /*
      * Parse our data
      */
     {
         struct sockaddr_in *sin;
         struct sockaddr_dl *sdl;
-        
+
         sdl = (struct sockaddr_dl *)get_rt_address(rtm, RTA_IFP);
         if (sdl) {
             //hexdump(sdl, sdl->sdl_len);
@@ -179,14 +185,14 @@ int rawsock_get_default_gateway(const char *ifname, unsigned *ipv4)
                 exit(1);
             }
         }
-        
+
         sin = (struct sockaddr_in *)get_rt_address(rtm, RTA_GATEWAY);
         if (sin) {
             *ipv4 = ntohl(sin->sin_addr.s_addr);
             free(rtm);
             return 0;
         }
-        
+
     }
 
     free(rtm);
@@ -217,7 +223,8 @@ struct route_info {
     char ifName[IF_NAMESIZE];
 };
 
-static int read_netlink(int fd, char *bufPtr, size_t sizeof_buffer, int seqNum, int pId)
+static int
+read_netlink(int fd, char *bufPtr, size_t sizeof_buffer, int seqNum, int pId)
 {
     struct nlmsghdr *nlHdr;
     int readLen = 0, msgLen = 0;
@@ -234,7 +241,7 @@ static int read_netlink(int fd, char *bufPtr, size_t sizeof_buffer, int seqNum, 
         /* Check if the header is valid */
         if ((NLMSG_OK(nlHdr, readLen) == 0)
             || (nlHdr->nlmsg_type == NLMSG_ERROR)) {
-            perror("Error in recieved packet");
+            perror("Error in received packet");
             return -1;
         }
 
@@ -258,7 +265,8 @@ static int read_netlink(int fd, char *bufPtr, size_t sizeof_buffer, int seqNum, 
 }
 
 /* For parsing the route info returned */
-static int parseRoutes(struct nlmsghdr *nlHdr, struct route_info *rtInfo)
+static int
+parseRoutes(struct nlmsghdr *nlHdr, struct route_info *rtInfo)
 {
     struct rtmsg *rtMsg;
     struct rtattr *rtAttr;
@@ -433,7 +441,8 @@ again:
         goto again;
     }
     if (err != NO_ERROR) {
-        fprintf(stderr, "GetAdaptersInfo failed with error: %u\n", err);
+        fprintf(stderr, "GetAdaptersInfo failed with error: %u\n", 
+                            (unsigned)err);
         return EFAULT;
     }
 

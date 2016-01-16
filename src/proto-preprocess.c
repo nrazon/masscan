@@ -1,9 +1,4 @@
-/* Copyright: (c) 2009-2010 by Robert David Graham
-** License: This code is private to the author, and you do not
-** have a license to run it, or own a copy, unless given
-** a license personally by the author. This is
-** explained in the LICENSE file at the root of the project.
-**/
+/* Copyright: (c) 2009-2010 by Robert David Graham */
 /****************************************************************************
 
         PREPROCESS PACKETS
@@ -53,7 +48,8 @@
 /****************************************************************************
  ****************************************************************************/
 unsigned
-preprocess_frame(const unsigned char *px, unsigned length, unsigned link_type, struct PreprocessedInfo *info)
+preprocess_frame(const unsigned char *px, unsigned length, unsigned link_type,
+                 struct PreprocessedInfo *info)
 {
     unsigned offset = 0;
     unsigned ethertype = 0;
@@ -115,6 +111,7 @@ parse_ipv4:
         info->ip_version = (px[offset]>>4)&0xF;
         info->ip_src = px+offset+12;
         info->ip_dst = px+offset+16;
+        info->ip_ttl = px[offset+8];
         info->ip_protocol = px[offset+9];
         info->ip_length = total_length;
         if (info->ip_version != 4)
@@ -142,6 +139,7 @@ parse_tcp:
         info->port_dst = ex16be(px+offset+2);
         info->app_offset = offset + tcp_length;
         info->app_length = length - info->app_offset;
+        info->transport_length = length - info->transport_offset;
         assert(info->app_length < 2000);
 
         return 1;
@@ -163,7 +161,7 @@ parse_udp:
         }
         return 1;
     }
-    
+
 parse_icmp:
     {
         VERIFY_REMAINING(4, FOUND_ICMP);
@@ -171,10 +169,15 @@ parse_icmp:
         info->port_dst = px[offset+1];
         return 1;
     }
-    
+
 parse_sctp:
     {
-        VERIFY_REMAINING(4, FOUND_SCTP);
+        VERIFY_REMAINING(12, FOUND_SCTP);
+        info->port_src = ex16be(px+offset+0);
+        info->port_dst = ex16be(px+offset+2);
+        info->app_offset = offset + 12;
+        info->app_length = length - info->app_offset;
+        assert(info->app_length < 2000);
         return 1;
     }
 
@@ -218,7 +221,7 @@ parse_ipv6_next:
         case 0x2c: /* IPv6 fragmetn */
             return 0;
         default:
-            printf("***** test me ******\n");
+            //printf("***** test me ******\n");
             return 0; /* todo: should add more protocols, like ICMP */
         }
     }
@@ -422,6 +425,7 @@ parse_linktype:
      */
     switch (link_type) {
     case 1:     goto parse_ethernet;
+    case 12:    goto parse_ipv4;
     case 0x69:  goto parse_wifi;
     case 119:   goto parse_prism_header;
     case 127:   goto parse_radiotap_header;
@@ -439,7 +443,6 @@ parse_linktype:
 parse_arp:
     info->ip_version = 256;
     info->ip_offset = offset;
-
     {
         //unsigned hardware_type;
         //unsigned protocol_type;
@@ -460,6 +463,7 @@ parse_arp:
         info->ip_src = px + offset + hardware_length;
         info->ip_dst = px + offset + 2*hardware_length + protocol_length;
         info->ip_protocol = opcode;
+        info->found_offset = info->ip_offset;
         return 1;
     }
 

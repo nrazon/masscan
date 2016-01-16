@@ -1,6 +1,7 @@
 #include "syn-cookie.h"
 #include "pixie-timer.h"
 #include "string_s.h"
+#include "siphash24.h"
 #include <time.h>
 #include <stdarg.h>
 
@@ -8,42 +9,34 @@
 #include <intrin.h>
 #endif
 
-
-static uint64_t entropy = 0;
-
 /***************************************************************************
  * Go gather some entropy (aka. randmoness) to seed hashing with.
  *
  * NOTE: Mostly it's here to amuse cryptographers with its lulz.
  ***************************************************************************/
-void
-syn_set_entropy(uint64_t seed)
+uint64_t
+get_entropy(void)
 {
+    uint64_t entropy[2] = {0,0};
     unsigned i;
-
-    /*
-     * If we have a manual seed, use that instead
-     */
-    if (seed) {
-        entropy = seed;
-        return;
-    }
 
     /*
      * Gather some random bits
      */
-    for (i=0; i<32; i++) {
+    for (i=0; i<64; i++) {
         FILE *fp;
-        entropy += pixie_nanotime();
+        entropy[0] += pixie_nanotime();
 #if defined(_MSC_VER)
-        entropy ^= __rdtsc();
+        entropy[0] ^= __rdtsc();
 #endif
         time(0);
         fopen_s(&fp, "/", "r");
-        entropy <<= 1;
+        entropy[1] <<= 1;
+        entropy[1] |= entropy[0]>>63;
+        entropy[0] <<= 1;
     }
 
-    entropy ^= time(0);
+    entropy[0] ^= time(0);
 
 #if defined(__linux__)
     {
@@ -55,19 +48,23 @@ syn_set_entropy(uint64_t seed)
             int x;
             uint64_t urand = 0;
             x = fread(&urand, 1, sizeof(urand), fp);
-            entropy ^= urand;
-            entropy ^= x;
+            entropy[0] ^= urand;
+            entropy[0] ^= x;
+            x = fread(&urand, 1, sizeof(urand), fp);
+            entropy[1] ^= urand;
+            entropy[1] ^= x;
             fclose(fp);
         }
-        entropy ^= pixie_nanotime();
+        entropy[0] ^= pixie_nanotime();
     }
 #endif
+
+    return entropy[0] ^ entropy[1];
 }
 
-
+#if 0
 /***************************************************************************
- * I'm using a Murmur hash to start with, will probably look at others
- * soon.
+ * This implements the "murmur" hash function.
  ***************************************************************************/
 static unsigned
 murmur(uint64_t entropy, ...)
@@ -109,11 +106,24 @@ murmur(uint64_t entropy, ...)
 
     return hash;
 }
+#endif
 
 /***************************************************************************
  ***************************************************************************/
-unsigned
-syn_hash(unsigned ip, unsigned port)
+uint64_t
+syn_cookie( unsigned ip_them, unsigned port_them,
+            unsigned ip_me, unsigned port_me,
+            uint64_t entropy)
 {
-    return murmur(entropy, ip, port);
+    unsigned data[4];
+    uint64_t x[2];
+
+    x[0] = entropy;
+    x[1] = entropy;
+
+    data[0] = ip_them;
+    data[1] = port_them;
+    data[2] = ip_me;
+    data[3] = port_me;
+    return siphash24(data, sizeof(data), x);
 }

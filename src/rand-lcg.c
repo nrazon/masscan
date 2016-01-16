@@ -1,14 +1,11 @@
 /*
     This is a "linear-congruent-generator", a type of random number
-    generator. We use it scan IPv4 addresses (and ports) in random
-    order, without having to keep 'state' about which ones we've
-    already scanned.
-
+    generator.
 */
 
 #include "rand-lcg.h"
 #include "rand-primegen.h" /* DJB's prime factoring code */
-
+#include "string_s.h"
 
 #include <math.h>  /* for 'sqrt()', may need -lm for gcc */
 #include <stdint.h>
@@ -43,8 +40,9 @@ typedef uint64_t PRIMEFACTORS[20];
  *      this because we are going to use prime non-factors for finding
  *      interesting numbers.
  ****************************************************************************/
-unsigned
-sieve_prime_factors(uint64_t number, PRIMEFACTORS factors, PRIMEFACTORS non_factors, double *elapsed)
+static unsigned
+sieve_prime_factors(uint64_t number, PRIMEFACTORS factors,
+                    PRIMEFACTORS non_factors, double *elapsed)
 {
     primegen pg;
     clock_t start;
@@ -171,7 +169,7 @@ lcg_rand(uint64_t index, uint64_t a, uint64_t c, uint64_t range)
  * This works by counting the results of rand(), which should be produced
  * exactly once.
  ****************************************************************************/
-unsigned
+static unsigned
 lcg_verify(uint64_t a, uint64_t c, uint64_t range, uint64_t max)
 {
     unsigned char *list;
@@ -180,6 +178,8 @@ lcg_verify(uint64_t a, uint64_t c, uint64_t range, uint64_t max)
 
     /* Allocate a list of 1-byte counters */
     list = (unsigned char *)malloc((size_t)((range<max)?range:max));
+    if (list == NULL)
+        exit(1);
     memset(list, 0, (size_t)((range<max)?range:max));
 
     /* For all numbers in the range, verify increment the counter for the
@@ -207,7 +207,7 @@ lcg_verify(uint64_t a, uint64_t c, uint64_t range, uint64_t max)
  * Count the number of digits in a number so that we can pretty-print a
  * bunch of numbers in nice columns.
  ****************************************************************************/
-unsigned
+static unsigned
 count_digits(uint64_t num)
 {
     unsigned result = 0;
@@ -230,7 +230,7 @@ count_digits(uint64_t num)
  * @return
  *      !is_coprime(c, factors)
  ****************************************************************************/
-uint64_t
+static uint64_t
 has_factors_in_common(uint64_t c, PRIMEFACTORS factors)
 {
     unsigned i;
@@ -313,17 +313,17 @@ lcg_calculate_constants(uint64_t m, uint64_t *out_a, uint64_t *inout_c, int is_d
         /*
          * print the results
          */
-        //printf("sizeof(int) = %llu-bits\n", (uint64_t)(sizeof(size_t)*8));
+        //printf("sizeof(int) = %" PRIu64 "-bits\n", (uint64_t)(sizeof(size_t)*8));
         printf("elapsed     = %5.3f-seconds\n", elapsed);
         printf("factors     = ");
         for (i=0; factors[i]; i++)
-            printf("%llu ", factors[i]);
+            printf("%" PRIu64 " ", factors[i]);
         printf("%s\n", factors[0]?"":"(none)");
-        printf("m           = %-24llu (0x%llx)\n", m, m);
-        printf("a           = %-24llu (0x%llx)\n", a, a);
-        printf("c           = %-24llu (0x%llx)\n", c, c);
-        printf("c%%m         = %-24llu (0x%llx)\n", c%m, c%m);
-        printf("a%%m         = %-24llu (0x%llx)\n", a%m, a%m);
+        printf("m           = %-24" PRIu64 " (0x%" PRIx64 ")\n", m, m);
+        printf("a           = %-24" PRIu64 " (0x%" PRIx64 ")\n", a, a);
+        printf("c           = %-24" PRIu64 " (0x%" PRIx64 ")\n", c, c);
+        printf("c%%m         = %-24" PRIu64 " (0x%" PRIx64 ")\n", c%m, c%m);
+        printf("a%%m         = %-24" PRIu64 " (0x%" PRIx64 ")\n", a%m, a%m);
 
         if (m < 1000000000) {
             if (lcg_verify(a, c+1, m, 280))
@@ -346,7 +346,7 @@ lcg_calculate_constants(uint64_t m, uint64_t *out_a, uint64_t *inout_c, int is_d
 
             for (i=0; i<100 && i < m; i++) {
                 x = lcg_rand(x, a, c, m);
-                count += printf("%*llu ", digits, x);
+                count += printf("%*" PRIu64 " ", digits, x);
                 if (count >= 70) {
                     count = 0;
                     printf("\n");
@@ -363,7 +363,7 @@ lcg_calculate_constants(uint64_t m, uint64_t *out_a, uint64_t *inout_c, int is_d
 /***************************************************************************
  ***************************************************************************/
 int
-randlcg_selftest()
+lcg_selftest(void)
 {
     unsigned i;
     int is_success = 0;

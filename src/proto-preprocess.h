@@ -1,9 +1,4 @@
-/* Copyright: (c) 2009-2010 by Robert David Graham
-** License: This code is private to the author, and you do not
-** have a license to run it, or own a copy, unless given
-** a license personally by the author. This is
-** explained in the LICENSE file at the root of the project.
-**/
+/* Copyright: (c) 2009-2010 by Robert David Graham */
 #ifndef PREPROCESS_H
 #define PREPROCESS_H
 
@@ -35,9 +30,11 @@ struct PreprocessedInfo {
     unsigned ip_version;    /* 4 or 6 */
     unsigned ip_protocol;   /* 6 for TCP, 11 for UDP */
     unsigned ip_length;     /* length of total packet */
+    unsigned ip_ttl;
     const unsigned char *ip_src;
     const unsigned char *ip_dst;
     unsigned transport_offset;  /* 34 for normal Ethernet */
+    unsigned transport_length;
     unsigned port_src;
     unsigned port_dst;
 

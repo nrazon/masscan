@@ -1,60 +1,35 @@
+/*
+
+    Parses DNS response information
+
+    The scanner sends a CHAOS TXT query for "version.bind". This module parses
+    DNS in order to find the response string.
+*/
 #include "proto-udp.h"
 #include "proto-dns.h"
+#include "proto-dns-parse.h"
 #include "proto-preprocess.h"
 #include "syn-cookie.h"
 #include "logger.h"
 #include "output.h"
+#include "masscan-app.h"
 #include "proto-banner1.h"
+#include "templ-port.h"
 #include "masscan.h"
 #include "unusedparm.h"
 
 
-struct DomainPointer
-{
-    const unsigned char *name;
-    unsigned length;
-};
-struct DNS_Incoming
-{
-    unsigned id;        /* transaction id */
-    unsigned is_valid:1;
-    unsigned is_formerr:1;
-    unsigned is_edns0:1;/* edns0 features found */
-    unsigned qr:1;      /* 'query' or 'response' */
-    unsigned aa:1;      /* 'authoritative answer' */
-    unsigned tc:1;      /* 'truncation' */
-    unsigned rd:1;      /* 'recursion desired' */
-    unsigned ra:1;      /* 'recursion available' */
-    unsigned z:3;       /* reserved */
-    unsigned opcode;
-    unsigned rcode;     /* response error code */
-    unsigned qdcount;   /* query count */
-    unsigned ancount;   /* answer count */
-    unsigned nscount;   /* name-server/authority count */
-    unsigned arcount;   /* additional record count */
-    struct {
-        unsigned payload_size;
-        unsigned version;
-        unsigned z;
-    } edns0;
-    const unsigned char *req;
-    unsigned req_length;
-    
-    /* the query name */
-    struct DomainPointer query_name;
-    unsigned query_type;
-    unsigned char query_name_buffer[256];
-
-    unsigned rr_count;
-    unsigned short rr_offset[1024];
-    unsigned edns0_offset;
-};
 
 
 #define VERIFY_REMAINING(n) if (offset+(n) > length) return;
 
 
 /****************************************************************************
+ * This skips over a name field while parsing the packet. If the name
+ * is just a two-byte compression field likce 0xc0 0x1a, then it'll skip
+ * those two bytes. However, when it does the skip, it does validate
+ * the name. Thus, if it's a compressed name, it'll follow the compression
+ * links to validate things like long names and infinite recursion.
  ****************************************************************************/
 static unsigned
 dns_name_skip_validate(const unsigned char *px, unsigned offset, unsigned length, unsigned name_length)
@@ -63,41 +38,63 @@ dns_name_skip_validate(const unsigned char *px, unsigned offset, unsigned length
     unsigned result = offset + 2;
     unsigned recursion = 0;
 
+    /* 'for all labels' */
     for (;;) {
         unsigned len;
 
+        /* validate: the eventual uncompressed name will be less than 255 */
         if (name_length >= 255)
             return ERROR;
 
+        /* validate: haven't gone off end of packet */
         if (offset >= length)
             return ERROR;
 
+        /* grab length of next label */
         len = px[offset];
+
+        /* Do two types of processing, either a compression code or a
+         * original label. Note that we can alternate back and forth
+         * between these two states. */
         if (len & 0xC0) {
+            /* validate: top 2 bits are 11*/
             if ((len & 0xC0) != 0xC0)
                 return ERROR;
-            else if (offset + 1 >= length)
+
+            /* validate: enough bytes left for 2 byte compression field */
+            if (offset + 1 >= length)
                 return ERROR;
-            else {
-                offset = (px[offset]&0x3F)<<8 | px[offset+1];
-                if (++recursion > 4)
-                    return ERROR;
-            }
+
+            /* follow the compression pointer to the next location */
+            offset = (px[offset]&0x3F)<<8 | px[offset+1];
+
+            /* validate: follow a max of 4 links */
+            if (++recursion > 4)
+                return ERROR;
         } else {
+            /* we have a normal label */
             recursion = 0;
+
+            /* If the label-length is zero, then that meaans we've reached
+             * the end of the name */
             if (len == 0) {
                 return result; /* end of domain name */
-            } else {
-                name_length += len + 1;
-                offset += len + 1;
             }
+
+            /* There are more labels to come, therefore skip this and go
+             * to the next one */
+            name_length += len + 1;
+            offset += len + 1;
         }
     }
 }
 
 /****************************************************************************
+ * Just skip the name, without validating whether it's valid or not. This
+ * is for re-parsing the packet usually, after we've validated that all
+ * the names are ok.
  ****************************************************************************/
-static unsigned
+unsigned
 dns_name_skip(const unsigned char px[], unsigned offset, unsigned max)
 {
     unsigned name_length = 0;
@@ -113,7 +110,7 @@ dns_name_skip(const unsigned char px[], unsigned offset, unsigned max)
             return max + 1;
 
         switch (px[offset]>>6) {
-        case 0: 
+        case 0:
             /* uncompressed label */
             if (px[offset] == 0) {
                 return offset+1; /* end of domain name */
@@ -128,7 +125,7 @@ dns_name_skip(const unsigned char px[], unsigned offset, unsigned max)
             return dns_name_skip_validate(px, offset, max, name_length);
         case 2:
             /* 0x40 - ENDS0 extended label type
-             * rfc2671 section 3.1 
+             * rfc2671 section 3.1
              * I have no idea how to parse this */
             return max + 1; /* totally clueless how to parse it */
         case 1:
@@ -139,8 +136,9 @@ dns_name_skip(const unsigned char px[], unsigned offset, unsigned max)
 
 /****************************************************************************
  ****************************************************************************/
-void
-dns_extract_name(const unsigned char px[], unsigned offset, unsigned max, struct DomainPointer *name)
+static void
+dns_extract_name(const unsigned char px[], unsigned offset, unsigned max,
+                 struct DomainPointer *name)
 {
     name->length = 0;
 
@@ -170,6 +168,7 @@ dns_extract_name(const unsigned char px[], unsigned offset, unsigned max, struct
         }
     }
 }
+
 
 /****************************************************************************
  ****************************************************************************/
@@ -236,8 +235,6 @@ proto_dns_parse(struct DNS_Incoming *dns, const unsigned char px[], unsigned off
     |                     QCLASS                    |
     +--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+--+
     */
-    if (dns->qdcount == 0)
-        return;
     for (i=0; i<dns->qdcount; i++) {
         unsigned xclass;
         unsigned xtype;
@@ -324,55 +321,99 @@ proto_dns_parse(struct DNS_Incoming *dns, const unsigned char px[], unsigned off
     return;
 }
 
-void handle_dns(struct Output *out, const unsigned char *px, unsigned length, struct PreprocessedInfo *parsed)
+
+/***************************************************************************
+ * Set the "syn-cookie" style information so that we can validate replies
+ * match a valid request. We don't hold "state" on the requests, so this
+ * becomes a hash of the port/IP information.
+ * DNS has a two-byte "transaction id" field, so we can't use the full
+ * cookie, just the lower two bytes of it.
+ * Below in "handle_dns", we validate that the cookie is correct.
+ ***************************************************************************/
+unsigned
+dns_set_cookie(unsigned char *px, size_t length, uint64_t cookie)
+{
+    if (length > 2) {
+        px[0] = (unsigned char)(cookie >> 8);
+        px[1] = (unsigned char)(cookie >> 0);
+        return cookie & 0xFFFF;
+    } else
+        return 0;
+}
+
+/***************************************************************************
+ * Process a DNS packet received in response to UDP probes to port 53.
+ * This function has three main tasks:
+ *  - parse the DNS protocol, and make sure it's valid DNS.
+ *  - make sure that the DNS response matches a valid request using
+ *    the "syn-cookie" approach.
+ *  - parse the "version.bind" response and report it as the version
+ *    string for the banner.
+ ***************************************************************************/
+unsigned
+handle_dns(struct Output *out, time_t timestamp,
+            const unsigned char *px, unsigned length, 
+            struct PreprocessedInfo *parsed,
+            uint64_t entropy)
 {
     unsigned ip_them;
+    unsigned ip_me;
     unsigned port_them = parsed->port_src;
+    unsigned port_me = parsed->port_dst;
     struct DNS_Incoming dns[1];
     unsigned offset;
+    uint64_t seqno;
 
     ip_them = parsed->ip_src[0]<<24 | parsed->ip_src[1]<<16
             | parsed->ip_src[2]<< 8 | parsed->ip_src[3]<<0;
+    ip_me = parsed->ip_dst[0]<<24 | parsed->ip_dst[1]<<16
+            | parsed->ip_dst[2]<< 8 | parsed->ip_dst[3]<<0;
+
+    seqno = (unsigned)syn_cookie(ip_them, port_them | Templ_UDP, ip_me, port_me, entropy);
 
     proto_dns_parse(dns, px, parsed->app_offset, parsed->app_offset + parsed->app_length);
 
+    if ((seqno & 0xFFFF) != dns->id)
+        return 1;
+
     if (dns->qr != 1)
-        return;
+        return 0;
     if (dns->rcode != 0)
-        return;
+        return 0;
     if (dns->qdcount != 1)
-        return;
+        return 0;
     if (dns->ancount < 1)
-        return;
+        return 0;
     if (dns->rr_count < 2)
-        return;
+        return 0;
 
 
     offset = dns->rr_offset[1];
     offset = dns_name_skip(px, offset, length);
     if (offset + 10 >= length)
-        return;
+        return 0;
 
     {
         unsigned type = px[offset+0]<<8 | px[offset+1];
         unsigned xclass = px[offset+2]<<8 | px[offset+3];
         unsigned rrlen = px[offset+8]<<8 | px[offset+9];
         unsigned txtlen = px[offset+10];
-        
+
         if (rrlen == 0 || txtlen > rrlen-1)
-            return;
+            return 0;
         if (type != 0x10 || xclass != 3)
-            return;
+            return 0;
 
         offset += 11;
 
         output_report_banner(
-                out,
-                ip_them, port_them, 
+                out, timestamp,
+                ip_them, 17, port_them,
                 PROTO_DNS_VERSIONBIND,
+                parsed->ip_ttl,
                 px + offset, txtlen);
-
-        
-        
     }
+
+
+    return 0;
 }
